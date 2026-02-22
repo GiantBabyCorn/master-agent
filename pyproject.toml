@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "master-agent"
+version = "0.1.0"
+description = "Master Agent interface for managing multiple Cursor Agents"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14.0",
+  "claude-agent-sdk>=0.1.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "openai>=1.100.0",
+  "pydantic-settings>=2.7.0",
+  "python-dotenv>=1.0.1",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2.3",
+  "uvicorn[standard]>=0.32.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.4",
+  "ruff>=0.8.0",
+  "mypy>=1.13.0"
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

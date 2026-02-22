@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "a1b2c3",
+      "provider": "CURSOR_CLI",
+      "status": "SUCCEEDED",
+      "approvalStatus": "NOT_REQUIRED",
+      "riskLevel": "LOW",
+      "prompt": "Summarize repository structure",
+      "resultText": "Repository has api, db, and providers modules.",
+      "errorText": null,
+      "requestedBy": "telegram:1234",
+      "projectId": null,
+      "agentId": null,
+      "createdAt": "2026-02-22T10:00:00",
+      "updatedAt": "2026-02-22T10:00:02"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "id": "apv-001",
+      "taskId": "tsk-001",
+      "status": "PENDING",
+      "reason": "Medium-risk action requires manual approval in balanced mode",
+      "suggestedSafeAlternative": "Provide a narrower scope or dry-run command.",
+      "requestedAt": "2026-02-22T11:00:00",
+      "decidedAt": null,
+      "decidedBy": null
+    }
+  ]
+}

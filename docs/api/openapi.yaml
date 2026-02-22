@@ -1,0 +1,144 @@
+openapi: 3.1.0
+info:
+  title: Master Agent API
+  version: 1.0.0
+  description: Versioned contract for dashboard and channel integrations.
+servers:
+  - url: http://localhost:3000
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: Service liveness result
+  /readyz:
+    get:
+      summary: Readiness check with provider statuses
+      responses:
+        "200":
+          description: Service readiness result
+  /api/projects:
+    get:
+      summary: List projects
+      responses:
+        "200":
+          description: Project list
+    post:
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created
+  /api/agents/run:
+    post:
+      summary: Submit orchestration task from legacy endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: Task submitted or completed
+  /api/v1/providers/capabilities:
+    get:
+      summary: List provider capabilities
+      responses:
+        "200":
+          description: Capability matrix
+  /api/v1/providers/health:
+    get:
+      summary: List provider health statuses
+      responses:
+        "200":
+          description: Provider health response
+  /api/v1/tasks:
+    get:
+      summary: List orchestrator tasks timeline
+      responses:
+        "200":
+          description: Task list
+  /api/v1/approvals:
+    get:
+      summary: List approval inbox
+      responses:
+        "200":
+          description: Approval list
+  /api/v1/logs:
+    get:
+      summary: List system logs
+      responses:
+        "200":
+          description: Log list
+  /api/v1/changes:
+    get:
+      summary: List change records
+      responses:
+        "200":
+          description: Change list
+  /api/v1/approvals/{approvalId}/approve:
+    post:
+      summary: Approve pending task
+      parameters:
+        - in: path
+          name: approvalId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval accepted
+        "404":
+          description: Approval not found
+  /api/v1/approvals/{approvalId}/reject:
+    post:
+      summary: Reject pending task
+      parameters:
+        - in: path
+          name: approvalId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval rejected
+        "404":
+          description: Approval not found
+components:
+  schemas:
+    CreateProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        repoPath:
+          type: string
+    RunRequest:
+      type: object
+      required: [provider, prompt]
+      properties:
+        provider:
+          type: string
+          enum: [cursor_cli, cursor_cloud, anthropic, codex]
+        agentName:
+          type: string
+        prompt:
+          type: string
+        projectId:
+          type: string
+        projectPath:
+          type: string
+        metadata:
+          type: object
+        idempotencyKey:
+          type: string

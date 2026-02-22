@@ -1,0 +1,4 @@
+services:
+  master_agent_api:
+    environment:
+      LOG_LEVEL: debug

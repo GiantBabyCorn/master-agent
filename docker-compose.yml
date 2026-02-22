@@ -1,0 +1,44 @@
+services:
+  master_agent_db:
+    image: postgres:16
+    container_name: master-agent-platform-postgres-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_env}
+      POSTGRES_DB: ${POSTGRES_DB:-master_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  master_agent_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_NODEJS: ${DOCKER_INSTALL_NODEJS:-false}
+        CURSOR_CLI_INSTALL_CMD: ${DOCKER_CURSOR_CLI_INSTALL_CMD:-}
+        ANTHROPIC_CLI_INSTALL_CMD: ${DOCKER_ANTHROPIC_CLI_INSTALL_CMD:-}
+        CODEX_CLI_INSTALL_CMD: ${DOCKER_CODEX_CLI_INSTALL_CMD:-}
+    container_name: master-agent-platform-api-backend
+    restart: unless-stopped
+    depends_on:
+      master_agent_db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://postgres:change_me_in_env@master_agent_db:5432/master_agent}
+      TELEGRAM_MODE: ${TELEGRAM_MODE:-webhook}
+    volumes:
+      - ./:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 3000 --reload
+
+volumes:
+  postgres_data:

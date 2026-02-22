@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.env
+.env.local
+.DS_Store
+coverage
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.sqlite3
+backups/
