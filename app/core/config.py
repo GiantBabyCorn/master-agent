@@ -27,10 +27,17 @@ class Settings(BaseSettings):
 
     cursor_cli_command: str = "agent"
     cursor_cli_timeout_ms: int = 120000
-    cursor_api_key: str = ""
+    cursor_cli_force_approve: bool = False
+    cursor_cli_login_timeout_sec: int = 300
 
     cursor_cloud_api_key: str = ""
     cursor_cloud_base_url: str = "https://api.cursor.com"
+    cursor_cloud_default_repo: str = ""
+    cursor_cloud_default_ref: str = ""
+    cursor_cloud_auto_pr: bool = True
+    cursor_cloud_branch_prefix: str = "agent/"
+    cursor_cloud_default_model: str = ""
+    cursor_cloud_poll_interval_sec: float = 30.0
 
     anthropic_api_key: str = ""
     anthropic_cli_command: str = "claude"

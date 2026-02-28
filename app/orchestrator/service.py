@@ -38,6 +38,8 @@ class OrchestratorResult:
     approval_required: bool
     output: str | None = None
     error: str | None = None
+    external_run_id: str | None = None
+    raw: dict | None = None
 
 
 class MasterOrchestrator:
@@ -196,4 +198,6 @@ class MasterOrchestrator:
             approval_required=False,
             output=result.output,
             error=result.error,
+            external_run_id=result.external_run_id,
+            raw=result.raw,
         )

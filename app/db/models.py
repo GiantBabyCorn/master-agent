@@ -378,3 +378,13 @@ class LogEvent(Base):
     message: Mapped[str] = mapped_column(Text)
     details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=datetime.utcnow, index=True)
+
+
+class CachedApiCall(Base):
+    __tablename__ = "cached_api_calls"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    cache_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    response_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=datetime.utcnow)
+    ttl_seconds: Mapped[int] = mapped_column(Integer, default=1800)

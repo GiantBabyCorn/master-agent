@@ -5,7 +5,7 @@ import threading
 import time
 
 from app.channels.telegram.client import TelegramRateLimitError, fetch_telegram_updates
-from app.channels.telegram.dispatcher import handle_telegram_update
+from app.channels.telegram.dispatcher import handle_telegram_callback, handle_telegram_update
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.orchestrator.service import MasterOrchestrator
@@ -50,7 +50,10 @@ class TelegramPollingRunner:
                     self._offset = update.update_id + 1
                     db = SessionLocal()
                     try:
-                        handle_telegram_update(db, update, self._orchestrator)
+                        if update.callback_query:
+                            handle_telegram_callback(db, update.callback_query, self._orchestrator)
+                        else:
+                            handle_telegram_update(db, update, self._orchestrator)
                     except Exception:  # noqa: BLE001
                         db.rollback()
                         raise

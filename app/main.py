@@ -14,6 +14,7 @@ from app.core.logging import configure_logging
 from app.core.middlewares import CorrelationIdMiddleware
 from app.channels.telegram.client import get_telegram_webhook_info, delete_telegram_webhook
 from app.channels.telegram.polling import TelegramPollingRunner
+from app.services.agent_watcher import CloudAgentWatcher
 from app.db.base import Base
 from app.db.session import engine
 from app.orchestrator.deps import get_orchestrator
@@ -24,6 +25,7 @@ configure_logging(settings.log_level)
 app = FastAPI(title="Master Agent API", version="0.1.0")
 logger = logging.getLogger("master-agent")
 polling_runner: TelegramPollingRunner | None = None
+agent_watcher: CloudAgentWatcher | None = None
 
 
 def _maybe_revoke_stale_webhook() -> None:
@@ -103,6 +105,12 @@ def on_startup() -> None:
         logger.info("Telegram transport mode: webhook")
     else:
         logger.info("Telegram transport mode: disabled")
+
+    global agent_watcher  # noqa: PLW0603
+    if orchestrator.provider_registry.is_available("cursor_cloud"):
+        agent_watcher = CloudAgentWatcher(poll_interval_sec=settings.cursor_cloud_poll_interval_sec)
+        agent_watcher.start()
+
     logger.info("Master Agent API started")
 
 
@@ -112,6 +120,10 @@ def on_shutdown() -> None:
     if polling_runner is not None:
         polling_runner.stop()
         polling_runner = None
+    global agent_watcher  # noqa: PLW0603
+    if agent_watcher is not None:
+        agent_watcher.stop()
+        agent_watcher = None
 
 
 app.add_middleware(CorrelationIdMiddleware)

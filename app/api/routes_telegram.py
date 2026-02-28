@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import db_dep
 from app.channels.telegram.client import register_telegram_webhook
-from app.channels.telegram.dispatcher import handle_telegram_update
+from app.channels.telegram.dispatcher import handle_telegram_callback, handle_telegram_update
 from app.channels.telegram.webhook import validate_webhook_secret
 from app.core.config import get_settings
 from app.orchestrator.deps import get_orchestrator
@@ -22,7 +22,10 @@ def telegram_webhook(
     validate_webhook_secret(x_telegram_bot_api_secret_token)
 
     orchestrator = get_orchestrator()
-    handle_telegram_update(db, payload, orchestrator)
+    if payload.callback_query:
+        handle_telegram_callback(db, payload.callback_query, orchestrator)
+    else:
+        handle_telegram_update(db, payload, orchestrator)
     return {"ok": True}
 
 

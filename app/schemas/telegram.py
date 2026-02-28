@@ -23,6 +23,16 @@ class TelegramMessage(BaseModel):
     date: int
 
 
+class TelegramCallbackQuery(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    from_: TelegramUser | None = Field(default=None, alias="from")
+    message: TelegramMessage | None = None
+    data: str | None = None
+
+
 class TelegramUpdate(BaseModel):
     update_id: int
     message: TelegramMessage | None = None
+    callback_query: TelegramCallbackQuery | None = None

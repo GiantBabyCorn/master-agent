@@ -15,6 +15,13 @@ class TelegramRateLimitError(Exception):
         super().__init__(f"Telegram rate limited — retry after {retry_after}s")
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_PARSE_MODE = "Markdown"
+_MD_ESCAPE_CHARS = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\["})
+
+
+def escape_md(text: str) -> str:
+    """Escape Telegram Markdown special characters in dynamic text."""
+    return text.translate(_MD_ESCAPE_CHARS)
 
 
 def telegram_api_url(method: str) -> str:
@@ -43,7 +50,7 @@ def send_telegram_message(
     settings = get_settings()
     if not settings.telegram_bot_token:
         return None
-    payload: dict = {"chat_id": chat_id, "text": text}
+    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE}
     if reply_to_message_id is not None:
         payload["reply_parameters"] = {"message_id": reply_to_message_id}
     with httpx.Client(timeout=settings.request_timeout_sec) as client:
@@ -65,7 +72,7 @@ def edit_telegram_message(chat_id: int, message_id: int, text: str) -> bool:
     settings = get_settings()
     if not settings.telegram_bot_token:
         return False
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE}
     with httpx.Client(timeout=settings.request_timeout_sec) as client:
         response = client.post(telegram_api_url("editMessageText"), json=payload)
         _check_rate_limit(response)
@@ -178,6 +185,62 @@ def send_threaded_response(
             prev_message_id = reply_telegram_message(chat_id, part, prev_message_id)
         else:
             prev_message_id = send_telegram_message(chat_id, part)
+
+
+def send_telegram_message_with_buttons(
+    chat_id: int,
+    text: str,
+    buttons: list[list[dict]],
+    reply_to_message_id: int | None = None,
+) -> int | None:
+    """Send a message with an inline keyboard. buttons is a list of rows, each row a list of {text, callback_data}."""
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return None
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": TELEGRAM_PARSE_MODE,
+        "reply_markup": {"inline_keyboard": buttons},
+    }
+    if reply_to_message_id is not None:
+        payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    with httpx.Client(timeout=settings.request_timeout_sec) as client:
+        response = client.post(telegram_api_url("sendMessage"), json=payload)
+        _check_rate_limit(response)
+        response.raise_for_status()
+        data = response.json()
+    return data.get("result", {}).get("message_id")
+
+
+def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:
+    """Acknowledge a callback query (dismiss the button loading spinner)."""
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return False
+    payload: dict = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    with httpx.Client(timeout=settings.request_timeout_sec) as client:
+        response = client.post(telegram_api_url("answerCallbackQuery"), json=payload)
+        _check_rate_limit(response)
+        response.raise_for_status()
+        data = response.json()
+    return data.get("ok", False)
+
+
+def delete_telegram_message(chat_id: int, message_id: int) -> bool:
+    """Delete a message."""
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return False
+    payload = {"chat_id": chat_id, "message_id": message_id}
+    with httpx.Client(timeout=settings.request_timeout_sec) as client:
+        response = client.post(telegram_api_url("deleteMessage"), json=payload)
+        _check_rate_limit(response)
+        response.raise_for_status()
+        data = response.json()
+    return data.get("ok", False)
 
 
 def fetch_telegram_updates(offset: int | None = None) -> list[dict]:
