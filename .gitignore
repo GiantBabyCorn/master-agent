@@ -1,16 +1,38 @@
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
+
+# Testing & Linting
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+coverage
+
+# Build & Distribution
+build/
+dist/
+
+# Virtual Environment
 .venv/
+
+# Environment Variables
 .env
 .env.local
-.DS_Store
-coverage
+
+# IDE & Editor
 .idea
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# OS
+.DS_Store
+
+# Database
 *.sqlite3
+
+# Project Specific
 backups/
+.template

@@ -1,4 +1,5 @@
 import logging
+import sys
 
 from fastapi import FastAPI
 from sqlalchemy import inspect
@@ -11,6 +12,7 @@ from app.api.routes_telegram import router as telegram_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.middlewares import CorrelationIdMiddleware
+from app.channels.telegram.client import get_telegram_webhook_info, delete_telegram_webhook
 from app.channels.telegram.polling import TelegramPollingRunner
 from app.db.base import Base
 from app.db.session import engine
@@ -22,6 +24,39 @@ configure_logging(settings.log_level)
 app = FastAPI(title="Master Agent API", version="0.1.0")
 logger = logging.getLogger("master-agent")
 polling_runner: TelegramPollingRunner | None = None
+
+
+def _maybe_revoke_stale_webhook() -> None:
+    try:
+        info = get_telegram_webhook_info()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not check Telegram webhook status: %s", exc)
+        return
+
+    webhook_url = info.get("url", "")
+    if not webhook_url:
+        return
+
+    pending = info.get("pending_update_count", 0)
+    logger.warning(
+        "Active Telegram webhook detected while TELEGRAM_MODE=%s — url=%s, pending_updates=%d",
+        settings.telegram_mode,
+        webhook_url,
+        pending,
+    )
+
+    if not settings.telegram_auto_revoke_webhook:
+        logger.warning(
+            "Set TELEGRAM_AUTO_REVOKE_WEBHOOK=true to auto-remove, "
+            "or call DELETE https://api.telegram.org/bot<token>/deleteWebhook manually"
+        )
+        return
+
+    try:
+        delete_telegram_webhook(drop_pending_updates=False)
+        logger.info("Stale Telegram webhook removed automatically (was: %s)", webhook_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to revoke stale Telegram webhook: %s", exc)
 
 
 @app.on_event("startup")
@@ -40,6 +75,25 @@ def on_startup() -> None:
     orchestrator = get_orchestrator()
     orchestrator.provider_registry.verify_all(logger=logger, force=True)
     logger.info("Orchestration mode: %s", settings.orchestration_mode)
+
+    if settings.orchestration_mode == "agentic" and settings.startup_require_master_provider_available:
+        if not orchestrator.provider_registry.is_available(settings.master_agent_provider):
+            reason = orchestrator.provider_registry.unavailable_reason(settings.master_agent_provider)
+            color_enabled = bool(getattr(sys.stderr, "isatty", lambda: False)())
+            red = "\033[91m" if color_enabled else ""
+            yellow = "\033[93m" if color_enabled else ""
+            reset = "\033[0m" if color_enabled else ""
+            print(f"{red}Startup blocked.{reset}", file=sys.stderr)
+            print(
+                f"{yellow}MASTER_AGENT_PROVIDER is unavailable:{reset} {settings.master_agent_provider}",
+                file=sys.stderr,
+            )
+            print(f"Reason: {reason}", file=sys.stderr)
+            print("Fix .env provider settings or switch ORCHESTRATION_MODE=rules.", file=sys.stderr)
+            raise SystemExit(2)
+
+    if settings.telegram_mode in {"polling", "disabled"} and settings.telegram_bot_token.strip():
+        _maybe_revoke_stale_webhook()
 
     global polling_runner  # noqa: PLW0603
     if settings.telegram_mode == "polling":

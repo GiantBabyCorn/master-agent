@@ -74,14 +74,35 @@ Detailed guide:
 1. Copy env:
    - `cp .env.example .env`
 2. Start stack:
-   - `docker compose up --build`
-3. Data persistence:
+   - foreground: `docker compose up --build`
+   - background (recommended): `docker compose up -d --build`
+   - background (without re-build): `docker compose up -d`
+3. Manage running services:
+   - status: `docker compose ps`
+   - logs: `docker compose logs -f`
+   - restart API only: `docker compose restart master_agent_api`
+   - stop stack (keep data): `docker compose down`
+4. Data persistence:
    - Postgres data is in named volume `postgres_data`
-4. DB port exposure:
+5. DB port exposure:
    - Default policy: Postgres is internal-only and has no host port mapping.
    - Only API container can access DB through compose network.
    - If emergency debugging needs direct DB access, temporarily add port mapping locally and remove it after debugging.
-5. Backup:
+   - Emergency local debug steps:
+     1. In `docker-compose.override.yml`, add:
+
+        ```yml
+        services:
+          master_agent_db:
+            ports:
+              - "127.0.0.1:5432:5432"
+        ```
+
+     2. Restart stack: `docker compose up -d`
+     3. Debug from VPS host only (for example `psql`/DB tool on `localhost:5432`)
+     4. Remove the temporary port mapping and run `docker compose up -d` again
+     5. Verify no exposure: `docker compose ps`
+6. Backup:
    - `bash scripts/backup_db.sh`
 
 Important:

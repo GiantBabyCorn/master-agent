@@ -163,7 +163,7 @@ class AgentTask(Base, TimestampMixin):
     requested_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, unique=True)
     project_id: Mapped[Optional[str]] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
-    agent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    agent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("provider_agents.id", ondelete="SET NULL"), nullable=True)
 
 
 class TaskStep(Base):

@@ -91,12 +91,12 @@ class ProviderRegistry:
             "anthropic": self._verify_cli_provider(
                 command=settings.anthropic_cli_command,
                 provider="anthropic",
-                required_env=[],
+                required_env=["ANTHROPIC_API_KEY"],
             ),
             "codex": self._verify_cli_provider(
                 command=settings.codex_cli_command,
                 provider="codex",
-                required_env=[],
+                required_env=["CODEX_API_KEY"],
             ),
         }
         self._verified_once = True

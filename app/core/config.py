@@ -1,6 +1,8 @@
 from functools import lru_cache
+import sys
 from typing import Set
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,11 +21,13 @@ class Settings(BaseSettings):
     telegram_webhook_url: str = ""
     telegram_allowed_user_ids: str = ""
     telegram_mode: str = "webhook"
-    telegram_poll_interval_sec: int = 3
+    telegram_poll_interval_sec: float = 3
     telegram_polling_timeout_sec: int = 30
+    telegram_auto_revoke_webhook: bool = True
 
     cursor_cli_command: str = "agent"
     cursor_cli_timeout_ms: int = 120000
+    cursor_api_key: str = ""
 
     cursor_cloud_api_key: str = ""
     cursor_cloud_base_url: str = "https://api.cursor.com"
@@ -37,6 +41,8 @@ class Settings(BaseSettings):
 
     approval_policy_default: str = "balanced"
     orchestration_mode: str = "rules"
+    master_agent_provider: str = "cursor_cli"
+    startup_require_master_provider_available: bool = True
     approval_auto_approve_read_only: bool = True
     approval_medium_requires_user: bool = True
 
@@ -55,4 +61,132 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        color_enabled = bool(getattr(sys.stderr, "isatty", lambda: False)())
+
+        def color(text: str, code: str) -> str:
+            if not color_enabled:
+                return text
+            return f"{code}{text}\033[0m"
+
+        missing_fields = []
+        invalid_fields: list[str] = []
+        for err in exc.errors():
+            if err.get("type") == "missing":
+                location = err.get("loc", ())
+                if location:
+                    missing_fields.append(str(location[0]).upper())
+            else:
+                location = err.get("loc", ())
+                if location:
+                    invalid_fields.append(str(location[0]).upper())
+
+        examples_by_field = {
+            "DATABASE_URL": 'DATABASE_URL="postgresql+psycopg://<user>:<password>@<host>:<port>/<db>"',
+            "TELEGRAM_MODE": "TELEGRAM_MODE=webhook",
+            "ORCHESTRATION_MODE": "ORCHESTRATION_MODE=rules",
+            "POSTGRES_PASSWORD": "POSTGRES_PASSWORD=<strong_random_password>",
+        }
+
+        print(color("Configuration check failed.", "\033[91m"), file=sys.stderr)
+        if missing_fields:
+            print(
+                f"{color('Missing required environment variables:', '\033[93m')} {', '.join(sorted(set(missing_fields)))}",
+                file=sys.stderr,
+            )
+        if invalid_fields:
+            print(
+                f"{color('Invalid environment variable values:', '\033[93m')} {', '.join(sorted(set(invalid_fields)))}",
+                file=sys.stderr,
+            )
+
+        print(color("How to fix:", "\033[96m"), file=sys.stderr)
+        print("1) Copy .env.example to .env if not already done", file=sys.stderr)
+        print("2) Fill required values in .env", file=sys.stderr)
+        print("3) Re-run the app", file=sys.stderr)
+        suggestion_fields = sorted(set(missing_fields + invalid_fields))
+        if suggestion_fields:
+            print("", file=sys.stderr)
+            print("Examples for missing/invalid fields:", file=sys.stderr)
+            for field in suggestion_fields:
+                if field in examples_by_field:
+                    print(f"- {examples_by_field[field]}", file=sys.stderr)
+            if "DATABASE_URL" in suggestion_fields:
+                print('- Docker compose runtime example: COMPOSE_DATABASE_URL="postgresql+psycopg://<user>:<password>@master_agent_db:5432/<db>"', file=sys.stderr)
+
+        raise SystemExit(2) from None
+
+    validation_issues: list[tuple[str, str]] = []
+
+    if settings.telegram_mode not in {"webhook", "polling", "disabled"}:
+        validation_issues.append(("TELEGRAM_MODE", "must be one of: webhook, polling, disabled"))
+
+    if settings.telegram_mode in {"webhook", "polling"} and not settings.telegram_bot_token.strip():
+        validation_issues.append(("TELEGRAM_BOT_TOKEN", "is required when TELEGRAM_MODE is webhook or polling"))
+
+    if settings.telegram_mode == "webhook":
+        if not settings.telegram_webhook_url.strip():
+            validation_issues.append(("TELEGRAM_WEBHOOK_URL", "is required when TELEGRAM_MODE=webhook"))
+        if not settings.telegram_webhook_secret.strip():
+            validation_issues.append(("TELEGRAM_WEBHOOK_SECRET", "is required when TELEGRAM_MODE=webhook"))
+
+    if settings.orchestration_mode not in {"rules", "agentic"}:
+        validation_issues.append(("ORCHESTRATION_MODE", "must be one of: rules, agentic"))
+
+    if settings.master_agent_provider not in {"cursor_cli", "cursor_cloud", "anthropic", "codex"}:
+        validation_issues.append(
+            ("MASTER_AGENT_PROVIDER", "must be one of: cursor_cli, cursor_cloud, anthropic, codex")
+        )
+
+    if settings.orchestration_mode == "agentic":
+        if settings.master_agent_provider == "cursor_cloud" and not settings.cursor_cloud_api_key.strip():
+            validation_issues.append(
+                ("CURSOR_CLOUD_API_KEY", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=cursor_cloud")
+            )
+        if settings.master_agent_provider == "cursor_cli" and not settings.cursor_cli_command.strip():
+            validation_issues.append(
+                ("CURSOR_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=cursor_cli")
+            )
+        if settings.master_agent_provider == "anthropic" and not settings.anthropic_cli_command.strip():
+            validation_issues.append(
+                ("ANTHROPIC_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=anthropic")
+            )
+        if settings.master_agent_provider == "codex" and not settings.codex_cli_command.strip():
+            validation_issues.append(
+                ("CODEX_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=codex")
+            )
+
+    if validation_issues:
+        color_enabled = bool(getattr(sys.stderr, "isatty", lambda: False)())
+
+        def color(text: str, code: str) -> str:
+            if not color_enabled:
+                return text
+            return f"{code}{text}\033[0m"
+
+        print(color("Configuration check failed.", "\033[91m"), file=sys.stderr)
+        print(color("Missing or invalid runtime requirements:", "\033[93m"), file=sys.stderr)
+        for key, reason in validation_issues:
+            print(f"- {key}: {reason}", file=sys.stderr)
+
+        print("", file=sys.stderr)
+        print(color("How to fix:", "\033[96m"), file=sys.stderr)
+        print("1) Open .env", file=sys.stderr)
+        print("2) Update the keys listed above", file=sys.stderr)
+        print("3) Re-run the app", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Common examples:", file=sys.stderr)
+        print("TELEGRAM_MODE=webhook", file=sys.stderr)
+        print('TELEGRAM_BOT_TOKEN="123456789:AAExampleTokenValue"', file=sys.stderr)
+        print('TELEGRAM_WEBHOOK_URL="https://your-public-domain.example.com"', file=sys.stderr)
+        print('TELEGRAM_WEBHOOK_SECRET="<random_secret>"', file=sys.stderr)
+        print("ORCHESTRATION_MODE=agentic", file=sys.stderr)
+        print("MASTER_AGENT_PROVIDER=cursor_cli", file=sys.stderr)
+        print('CURSOR_CLI_COMMAND="agent"', file=sys.stderr)
+        print('CURSOR_CLOUD_API_KEY="key_xxx"', file=sys.stderr)
+
+        raise SystemExit(2)
+
+    return settings

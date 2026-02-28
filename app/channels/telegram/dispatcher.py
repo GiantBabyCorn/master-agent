@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.channels.telegram.client import send_telegram_message
+from app.channels.telegram.client import reply_telegram_message, send_telegram_message, send_threaded_response
 from app.core.config import get_settings
 from app.db.models import ChannelSession, LogLevel, Message, MessageDirection, MessageSource, Project, ProviderAgent
 from app.orchestrator.service import MasterOrchestrator
@@ -68,36 +68,47 @@ def _help_text() -> str:
     )
 
 
+def _respond(chat_id: int, text: str, placeholder_id: int | None) -> None:
+    """Send response: edit placeholder if available, otherwise plain send. Handles long messages."""
+    send_threaded_response(chat_id, text, edit_message_id=placeholder_id)
+
+
 def dispatch_telegram_command(
     db: Session,
     chat_id: int,
     text: str,
     orchestrator: MasterOrchestrator,
+    placeholder_message_id: int | None = None,
     idempotency_key: str | None = None,
 ) -> None:
     parts = text.strip().split()
     if not parts:
-        send_telegram_message(chat_id, "Unknown command. Use /help.")
+        _respond(chat_id, "Unknown command. Use /help.", placeholder_message_id)
         return
 
     command, rest = parts[0], parts[1:]
     if command == "/help":
-        send_telegram_message(chat_id, _help_text())
+        _respond(chat_id, _help_text(), placeholder_message_id)
         return
 
     if command == "/projects":
-        send_telegram_message(chat_id, _list_projects_text(db))
+        _respond(chat_id, _list_projects_text(db), placeholder_message_id)
         return
 
     if command == "/providers":
         providers = orchestrator.provider_registry.list_capabilities()
-        lines = [f'- {item["provider"]}: stream={item["supports_stream"]}, subagents={item["supports_subagents"]}' for item in providers]
-        send_telegram_message(chat_id, "Providers:\n" + "\n".join(lines))
+        lines = []
+        for item in providers:
+            status_icon = "+" if item["enabled"] else "-"
+            status_label = item["status"]
+            reason = f' ({item["reason"]})' if item.get("reason") else ""
+            lines.append(f"[{status_icon}] {item['provider']}: {status_label}{reason}")
+        _respond(chat_id, "Providers:\n" + "\n".join(lines), placeholder_message_id)
         return
 
     if command == "/run":
         if len(rest) < 2:
-            send_telegram_message(chat_id, "Usage: /run <provider> <prompt...>")
+            _respond(chat_id, "Usage: /run <provider> <prompt...>", placeholder_message_id)
             return
         provider = rest[0]
         prompt = " ".join(rest[1:]).strip()
@@ -109,30 +120,30 @@ def dispatch_telegram_command(
             idempotency_key=idempotency_key,
         )
         if result.approval_required:
-            send_telegram_message(chat_id, f"Approval required. Task={result.task_id}. Reason={result.error}")
+            _respond(chat_id, f"Approval required. Task={result.task_id}. Reason={result.error}", placeholder_message_id)
             return
-        send_telegram_message(chat_id, (result.output or result.error or "No output")[:3000])
+        _respond(chat_id, result.output or result.error or "No output", placeholder_message_id)
         return
 
     if command == "/sync":
         if len(rest) < 1:
-            send_telegram_message(chat_id, "Usage: /sync <provider>")
+            _respond(chat_id, "Usage: /sync <provider>", placeholder_message_id)
             return
         provider = rest[0]
         data = trigger_provider_sync(db, provider=provider, triggered_by=f"telegram:{chat_id}")
-        send_telegram_message(chat_id, f"Sync done. job={data['syncJobId']} summary={data['summary']}")
+        _respond(chat_id, f"Sync done. job={data['syncJobId']} summary={data['summary']}", placeholder_message_id)
         return
 
     if command == "/agent":
         if len(rest) < 1:
-            send_telegram_message(chat_id, "Usage: /agent <create|list|start|stop> ...")
+            _respond(chat_id, "Usage: /agent <create|list|start|stop> ...", placeholder_message_id)
             return
         subcommand = rest[0]
         args = rest[1:]
 
         if subcommand == "create":
             if len(args) < 2:
-                send_telegram_message(chat_id, "Usage: /agent create <provider> <name>")
+                _respond(chat_id, "Usage: /agent create <provider> <name>", placeholder_message_id)
                 return
             provider = args[0]
             name = " ".join(args[1:])
@@ -144,28 +155,28 @@ def dispatch_telegram_command(
                 mode="rules",
                 config={},
             )
-            send_telegram_message(chat_id, f"Agent created: id={agent.id} provider={agent.provider.value} name={agent.name}")
+            _respond(chat_id, f"Agent created: id={agent.id} provider={agent.provider.value} name={agent.name}", placeholder_message_id)
             return
 
         if subcommand == "list":
             provider = args[0] if args else None
             rows, _ = list_provider_agents(db, provider=provider, status=None, cursor=0, limit=20)
             if not rows:
-                send_telegram_message(chat_id, "No agents found.")
+                _respond(chat_id, "No agents found.", placeholder_message_id)
                 return
             lines = [f"- {item.id} | {item.provider.value} | {item.name} | {item.status.value}" for item in rows]
-            send_telegram_message(chat_id, "Agents:\n" + "\n".join(lines))
+            _respond(chat_id, "Agents:\n" + "\n".join(lines), placeholder_message_id)
             return
 
         if subcommand == "start":
             if len(args) < 2:
-                send_telegram_message(chat_id, "Usage: /agent start <agentId> <prompt...>")
+                _respond(chat_id, "Usage: /agent start <agentId> <prompt...>", placeholder_message_id)
                 return
             agent_id = args[0]
             prompt = " ".join(args[1:])
             agent = db.get(ProviderAgent, agent_id)
             if agent is None:
-                send_telegram_message(chat_id, "Agent not found.")
+                _respond(chat_id, "Agent not found.", placeholder_message_id)
                 return
             result = start_provider_agent(
                 db,
@@ -176,26 +187,26 @@ def dispatch_telegram_command(
                 project_path=None,
                 metadata={},
             )
-            send_telegram_message(chat_id, (result.get("output") or result.get("error") or "No output")[:3000])
+            _respond(chat_id, result.get("output") or result.get("error") or "No output", placeholder_message_id)
             return
 
         if subcommand == "stop":
             if len(args) < 1:
-                send_telegram_message(chat_id, "Usage: /agent stop <agentId>")
+                _respond(chat_id, "Usage: /agent stop <agentId>", placeholder_message_id)
                 return
             agent_id = args[0]
             agent = db.get(ProviderAgent, agent_id)
             if agent is None:
-                send_telegram_message(chat_id, "Agent not found.")
+                _respond(chat_id, "Agent not found.", placeholder_message_id)
                 return
             result = stop_provider_agent(db, provider_agent=agent)
-            send_telegram_message(chat_id, f"Agent stopped. status={result['status']}")
+            _respond(chat_id, f"Agent stopped. status={result['status']}", placeholder_message_id)
             return
 
-        send_telegram_message(chat_id, "Unknown /agent subcommand")
+        _respond(chat_id, "Unknown /agent subcommand", placeholder_message_id)
         return
 
-    send_telegram_message(chat_id, "Unknown command. Use /help.")
+    _respond(chat_id, "Unknown command. Use /help.", placeholder_message_id)
 
 
 def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: MasterOrchestrator) -> None:
@@ -225,7 +236,7 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
     db.commit()
 
     if not is_authorized_user(user_id):
-        send_telegram_message(chat_id, "Unauthorized user.")
+        reply_telegram_message(chat_id, "Unauthorized user.", message.message_id)
         write_audit_log(
             db,
             level=LogLevel.WARN,
@@ -235,20 +246,28 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
         )
         return
 
+    placeholder_id = reply_telegram_message(chat_id, "Received, processing...", message.message_id)
+
     try:
         dispatch_telegram_command(
             db,
             chat_id,
             message.text,
             orchestrator,
+            placeholder_message_id=placeholder_id,
             idempotency_key=f"telegram:{update.update_id}",
         )
     except Exception as exc:  # noqa: BLE001
+        import logging
+        import traceback
+        logging.getLogger("master-agent.telegram.dispatcher").error(
+            "Command dispatch failed: %s\n%s", exc, traceback.format_exc()
+        )
         write_audit_log(
             db,
             level=LogLevel.ERROR,
             context="telegram.command",
             message="Telegram command failed",
-            details={"error": str(exc), "chatId": chat_id},
+            details={"error": str(exc), "chatId": chat_id, "traceback": traceback.format_exc()},
         )
-        send_telegram_message(chat_id, "Command failed. Check server logs.")
+        _respond(chat_id, f"Command failed: {exc}", placeholder_id)

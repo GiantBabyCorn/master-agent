@@ -19,9 +19,15 @@ class CursorCliProvider:
 
     def launch_task(self, request: ProviderTaskRequest) -> ProviderTaskResult:
         settings = get_settings()
-        args = [settings.cursor_cli_command, "-p", request.prompt]
+        args = [settings.cursor_cli_command, "-p", "--trust", request.prompt]
+        if settings.cursor_api_key:
+            args.insert(1, f"--api-key={settings.cursor_api_key}")
 
         try:
+            env = None
+            if settings.cursor_api_key:
+                import os
+                env = {**os.environ, "CURSOR_API_KEY": settings.cursor_api_key}
             proc = subprocess.run(
                 args,
                 text=True,
@@ -29,6 +35,7 @@ class CursorCliProvider:
                 timeout=settings.cursor_cli_timeout_ms / 1000.0,
                 check=False,
                 cwd=request.project_path or None,
+                env=env,
             )
         except Exception as exc:  # noqa: BLE001
             return ProviderTaskResult(success=False, output="", error=str(exc))

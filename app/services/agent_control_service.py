@@ -11,6 +11,7 @@ from app.db.models import (
     AgentLog,
     AgentMessage,
     AgentRun,
+    LogLevel,
     OrchestrationMode,
     ProviderAgent,
     ProviderKind,
@@ -249,6 +250,7 @@ def start_provider_agent(
         ended_at=datetime.utcnow(),
     )
     db.add(run)
+    db.flush()
     db.add(
         AgentMessage(
             id=new_id(),
