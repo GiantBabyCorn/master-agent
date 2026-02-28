@@ -41,6 +41,33 @@ def _check_rate_limit(response: httpx.Response) -> None:
         raise TelegramRateLimitError(retry_after)
 
 
+def _telegram_error_description(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+        return str(data.get("description") or response.text)
+    except Exception:  # noqa: BLE001
+        return response.text
+
+
+def _post_telegram(
+    method: str,
+    payload: dict,
+    *,
+    timeout_sec: int,
+) -> dict:
+    """POST to Telegram API and raise on non-success responses."""
+    with httpx.Client(timeout=timeout_sec) as client:
+        response = client.post(telegram_api_url(method), json=payload)
+        _check_rate_limit(response)
+        if response.status_code < 400:
+            return response.json()
+
+        description = _telegram_error_description(response)
+        logger.error("Telegram %s failed (%s): %s", method, response.status_code, description)
+        response.raise_for_status()
+        return {}
+
+
 def send_telegram_message(
     chat_id: int,
     text: str,
@@ -53,11 +80,11 @@ def send_telegram_message(
     payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE}
     if reply_to_message_id is not None:
         payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    with httpx.Client(timeout=settings.request_timeout_sec) as client:
-        response = client.post(telegram_api_url("sendMessage"), json=payload)
-        _check_rate_limit(response)
-        response.raise_for_status()
-        data = response.json()
+    data = _post_telegram(
+        "sendMessage",
+        payload,
+        timeout_sec=settings.request_timeout_sec,
+    )
     result = data.get("result", {})
     return result.get("message_id")
 
@@ -73,11 +100,11 @@ def edit_telegram_message(chat_id: int, message_id: int, text: str) -> bool:
     if not settings.telegram_bot_token:
         return False
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": TELEGRAM_PARSE_MODE}
-    with httpx.Client(timeout=settings.request_timeout_sec) as client:
-        response = client.post(telegram_api_url("editMessageText"), json=payload)
-        _check_rate_limit(response)
-        response.raise_for_status()
-        data = response.json()
+    data = _post_telegram(
+        "editMessageText",
+        payload,
+        timeout_sec=settings.request_timeout_sec,
+    )
     return data.get("ok", False)
 
 
@@ -205,11 +232,11 @@ def send_telegram_message_with_buttons(
     }
     if reply_to_message_id is not None:
         payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    with httpx.Client(timeout=settings.request_timeout_sec) as client:
-        response = client.post(telegram_api_url("sendMessage"), json=payload)
-        _check_rate_limit(response)
-        response.raise_for_status()
-        data = response.json()
+    data = _post_telegram(
+        "sendMessage",
+        payload,
+        timeout_sec=settings.request_timeout_sec,
+    )
     return data.get("result", {}).get("message_id")
 
 

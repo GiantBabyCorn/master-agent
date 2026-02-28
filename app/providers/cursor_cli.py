@@ -12,7 +12,10 @@ logger = logging.getLogger("master-agent.cursor_cli")
 
 AUTH_REQUIRED_MARKER = "AUTH_REQUIRED"
 _AUTH_KEYWORDS = ("authentication required", "agent login", "not authenticated")
-_LOGIN_URL_PATTERN = re.compile(r"(https://cursor\.com/loginDeepControl\S+)")
+_OSC8_URL_PATTERN = re.compile(r"\x1b]8;;([^\x1b]+)\x1b\\")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_LOGIN_URL_PATTERN = re.compile(r"https://cursor\.com/loginDeepControl\?[^\s<>'\"`]+")
+_LOGIN_URL_FALLBACK_PATTERN = re.compile(r"https://cursor\.com/loginDeepControl(?:\?[^\s<>'\"`]*)?")
 
 
 class CursorCliProvider:
@@ -29,6 +32,25 @@ class CursorCliProvider:
     def _is_auth_error(output: str) -> bool:
         lower = output.lower()
         return any(kw in lower for kw in _AUTH_KEYWORDS)
+
+    @staticmethod
+    def _extract_login_url(text: str) -> str | None:
+        """Extract a full Cursor login URL from plain text or OSC8 hyperlink escapes."""
+        # Some CLIs emit OSC8 hyperlinks where the visible text is shortened/truncated.
+        for match in _OSC8_URL_PATTERN.finditer(text):
+            candidate = match.group(1).strip()
+            if "https://cursor.com/loginDeepControl" in candidate and not candidate.endswith("?"):
+                return candidate
+
+        cleaned = _ANSI_ESCAPE_PATTERN.sub("", text)
+        collapsed = cleaned.replace("\n", "")
+        match = _LOGIN_URL_PATTERN.search(collapsed) or _LOGIN_URL_FALLBACK_PATTERN.search(collapsed)
+        if not match:
+            return None
+        candidate = match.group(0).strip().rstrip(".,)")
+        if candidate.endswith("?"):
+            return None
+        return candidate
 
     def launch_task(self, request: ProviderTaskRequest) -> ProviderTaskResult:
         settings = get_settings()
@@ -78,13 +100,17 @@ class CursorCliProvider:
             text=True,
         )
         url = None
+        output_buffer = ""
         for line in iter(proc.stdout.readline, ""):
-            match = _LOGIN_URL_PATTERN.search(line)
-            if match:
-                url = match.group(1)
+            output_buffer += line
+            extracted = self._extract_login_url(output_buffer)
+            if extracted:
+                url = extracted
                 break
             if proc.poll() is not None:
                 break
+        if not url:
+            url = self._extract_login_url(output_buffer)
         return url, proc
 
     def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:

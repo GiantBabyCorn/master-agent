@@ -432,12 +432,12 @@ def dispatch_telegram_command(
         providers = orchestrator.provider_registry.list_capabilities()
         lines = []
         for item in providers:
-            icon = "✓" if item["enabled"] else "✗"
+            icon = "✅" if item["enabled"] else "❌"
             name = item["provider"]
             status_label = escape_md(item["status"])
-            reason = f" — _{escape_md(item['reason'])}_" if item.get("reason") else ""
-            lines.append(f"{icon} `{name}`: *{status_label}*{reason}")
-        _respond(chat_id, "*Providers:*\n" + "\n".join(lines), placeholder_message_id)
+            reason = f" - {escape_md(item['reason'])}" if item.get("reason") else ""
+            lines.append(f"{icon} {escape_md(name)}: {status_label}{reason}")
+        _respond(chat_id, "Providers:\n" + "\n".join(lines), placeholder_message_id)
         return
 
     if command == "/run":
