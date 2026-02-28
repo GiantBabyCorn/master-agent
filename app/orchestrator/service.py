@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -51,6 +53,53 @@ class MasterOrchestrator:
             for provider in PROVIDER_KIND_MAP
         }
 
+    @staticmethod
+    def _existing_idempotent_result(db: Session, idempotency_key: str) -> OrchestratorResult | None:
+        existing = db.scalar(select(AgentTask).where(AgentTask.idempotency_key == idempotency_key))
+        if existing is None:
+            return None
+
+        approval_required = existing.status == TaskStatus.BLOCKED or existing.approval_status == ApprovalStatus.PENDING
+        output = existing.result_text
+        error = existing.error_text
+        status_value = existing.status.value
+        task_line = f"Task: {existing.id}"
+        status_line = f"Status: {status_value}"
+
+        if existing.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            output = (
+                "This Telegram update was already received and is still processing.\n"
+                f"{task_line}\n"
+                f"{status_line}\n"
+                "Please wait for completion."
+            )
+        elif existing.status == TaskStatus.BLOCKED:
+            output = (
+                "This Telegram update was already received and is waiting for approval.\n"
+                f"{task_line}\n"
+                f"{status_line}"
+            )
+        elif existing.status == TaskStatus.SUCCEEDED and not output:
+            output = (
+                "This Telegram update was already processed successfully.\n"
+                f"{task_line}\n"
+                f"{status_line}"
+            )
+        elif existing.status == TaskStatus.FAILED and not error:
+            error = (
+                "This Telegram update was already processed but failed.\n"
+                f"{task_line}\n"
+                f"{status_line}"
+            )
+
+        return OrchestratorResult(
+            task_id=existing.id,
+            status=existing.status.value,
+            approval_required=approval_required,
+            output=output,
+            error=error,
+        )
+
     def submit_task(
         self,
         db: Session,
@@ -79,6 +128,11 @@ class MasterOrchestrator:
                 error=self.provider_registry.unavailable_reason(provider),
             )
 
+        if idempotency_key:
+            existing = self._existing_idempotent_result(db, idempotency_key)
+            if existing is not None:
+                return existing
+
         decision = evaluate_policy(PolicyInput(prompt=prompt, provider=provider))
         task = AgentTask(
             id=new_id(),
@@ -93,7 +147,20 @@ class MasterOrchestrator:
             agent_id=agent_id,
         )
         db.add(task)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if idempotency_key:
+                existing = self._existing_idempotent_result(db, idempotency_key)
+                if existing is not None:
+                    return existing
+            return OrchestratorResult(
+                task_id="",
+                status="FAILED",
+                approval_required=False,
+                error="Failed to create task due to duplicate request",
+            )
 
         db.add(
             PolicyDecision(

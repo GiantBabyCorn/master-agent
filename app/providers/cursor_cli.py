@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
+import time
 from datetime import datetime
 
 from app.core.config import get_settings
@@ -99,19 +101,34 @@ class CursorCliProvider:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        url = None
+        if proc.stdout is None:
+            return None, proc
+
+        # Avoid blocking forever on readline() if the CLI emits partial/no newlines.
         output_buffer = ""
-        for line in iter(proc.stdout.readline, ""):
-            output_buffer += line
-            extracted = self._extract_login_url(output_buffer)
-            if extracted:
-                url = extracted
-                break
+        deadline = time.monotonic() + 10.0
+        try:
+            os.set_blocking(proc.stdout.fileno(), False)
+        except Exception:  # noqa: BLE001
+            pass
+
+        while time.monotonic() < deadline:
+            try:
+                chunk = proc.stdout.read()  # non-blocking when set_blocking succeeded
+            except Exception:  # noqa: BLE001
+                chunk = None
+
+            if chunk:
+                output_buffer += chunk
+                extracted = self._extract_login_url(output_buffer)
+                if extracted:
+                    return extracted, proc
+
             if proc.poll() is not None:
                 break
-        if not url:
-            url = self._extract_login_url(output_buffer)
-        return url, proc
+            time.sleep(0.1)
+
+        return self._extract_login_url(output_buffer), proc
 
     def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:
         """Wait for the login process to complete. Returns True on success."""
