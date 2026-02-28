@@ -28,7 +28,7 @@ from app.services.agent_control_service import (
     trigger_provider_sync,
 )
 from app.services.agent_watcher import watch_cloud_agent
-from app.providers.cursor_cli import AUTH_REQUIRED_MARKER, CursorCliProvider
+from app.providers.cursor_cli import AUTH_REQUIRED_MARKER
 from app.providers.cursor_cloud import CursorCloudProvider
 from app.services.audit_service import write_audit_log
 from app.utils.ids import new_id
@@ -142,6 +142,10 @@ def _help_text() -> str:
             "*Sync:*",
             "`/sync <provider>`",
             "  Ex: `/sync cursor_cloud`",
+            "",
+            "*Authentication:*",
+            "`/login <provider>` — Authenticate a provider (OAuth)",
+            "  Ex: `/login cursor_cli` or `/login claude_cli`",
         ]
     )
 
@@ -312,45 +316,69 @@ def _handle_cli_auth_required(
     chat_id: int,
     placeholder_id: int | None,
     orchestrator: MasterOrchestrator,
+    provider_name: str,
     rerun_fn,
 ) -> None:
-    """Handle AUTH_REQUIRED from cursor_cli: trigger OAuth login via Telegram."""
+    """Handle AUTH_REQUIRED from a CLI provider: trigger OAuth login via Telegram."""
     settings = get_settings()
-    provider: CursorCliProvider = orchestrator.provider_registry.get("cursor_cli")
+
+    try:
+        provider = orchestrator.provider_registry.get(provider_name)
+    except KeyError:
+        _respond(chat_id, f"Unknown provider `{escape_md(provider_name)}`", placeholder_id)
+        return
+
+    if not hasattr(provider, "start_login"):
+        _respond(
+            chat_id,
+            f"Provider `{escape_md(provider_name)}` does not support interactive login.\n"
+            "Please authenticate manually on the server.",
+            placeholder_id,
+        )
+        return
 
     _respond(chat_id, "Login required. Starting authentication...", placeholder_id)
 
     try:
         url, proc = provider.start_login()
     except Exception as exc:  # noqa: BLE001
-        _respond(chat_id, f"Failed to start login: `{str(exc)}`", placeholder_id)
+        _respond(chat_id, f"Failed to start login: `{escape_md(str(exc))}`", placeholder_id)
         return
+
+    # Determine login timeout from settings (cursor_cli has its own, claude_cli falls back)
+    login_timeout = getattr(settings, f"{provider_name}_login_timeout_sec", None) or settings.cursor_cli_login_timeout_sec
+    timeout_min = login_timeout // 60
 
     if url:
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            f"Login required. Click to authenticate:\n{url}\n\n_Waiting up to {settings.cursor_cli_login_timeout_sec // 60} min..._",
+            f"Tap the button below to log in to *{escape_md(provider_name)}*:",
+        )
+        send_telegram_message_with_buttons(
+            chat_id,
+            f"_Waiting up to {timeout_min} min after you complete login..._",
+            [[{"text": "\U0001f510 Open Login Page", "url": url}]],
+            reply_to_message_id=placeholder_id,
         )
     else:
-        # Some CLI versions don't print a URL to stdout when not attached to a TTY.
-        # Keep waiting for login completion instead of failing immediately.
+        # Some CLI versions don't emit a URL to stdout when not attached to a TTY.
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            "Login required, but no URL was captured from CLI output.\n\n"
+            f"Login required for *{escape_md(provider_name)}*, but no URL was captured from CLI output.\n\n"
             "Please complete login from the server terminal if a browser prompt appeared there.\n"
-            f"_Waiting up to {settings.cursor_cli_login_timeout_sec // 60} min..._",
+            f"_Waiting up to {timeout_min} min..._",
         )
 
-    success = provider.wait_login(proc, timeout_sec=settings.cursor_cli_login_timeout_sec)
+    success = provider.wait_login(proc, timeout_sec=login_timeout)
 
     if not success:
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            "Login did not complete in time.\n"
-            "Please run `agent login` in the server/container terminal once, then retry your Telegram command.",
+            f"Login for *{escape_md(provider_name)}* did not complete in time.\n"
+            f"Please run the login command in the server/container terminal, then retry your Telegram command.",
         )
         return
 
@@ -535,7 +563,7 @@ def dispatch_telegram_command(
             metadata=metadata or None,
         )
         if result.error and AUTH_REQUIRED_MARKER in result.error:
-            _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, _run_task)
+            _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, provider, _run_task)
             return
         if result.approval_required:
             _respond(chat_id, f"⏳ *Approval required*\nTask: `{result.task_id}`\nReason: {escape_md(result.error or '')}", placeholder_message_id)
@@ -543,6 +571,14 @@ def dispatch_telegram_command(
         if provider == "cursor_cloud" and result.external_run_id:
             _register_cloud_agent(db, result, chat_id)
         _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_message_id)
+        return
+
+    if command == "/login":
+        if not first_line_tokens:
+            _respond(chat_id, "Usage: `/login <provider>`\nExample: `/login cursor_cli` or `/login claude_cli`", placeholder_message_id)
+            return
+        login_provider = first_line_tokens[0]
+        _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, login_provider, lambda: None)
         return
 
     if command == "/sync":
@@ -659,7 +695,8 @@ def dispatch_telegram_command(
             )
             error_text = result.get("error") or ""
             if AUTH_REQUIRED_MARKER in error_text:
-                _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, _run_agent_task)
+                agent_provider = agent.provider.value.lower() if agent.provider else "cursor_cli"
+                _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, agent_provider, _run_agent_task)
                 return
             _respond(chat_id, escape_md(result.get("output") or error_text or "No output"), placeholder_message_id)
             return

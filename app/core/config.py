@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     cursor_cli_timeout_ms: int = 120000
     cursor_cli_force_approve: bool = False
     cursor_cli_login_timeout_sec: int = 300
+    cursor_cli_url_capture_timeout_sec: int = 30
 
     cursor_cloud_api_key: str = ""
     cursor_cloud_base_url: str = "https://api.cursor.com"
@@ -41,6 +42,11 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     anthropic_cli_command: str = "claude"
+    anthropic_api_model: str = "claude-opus-4-6"
+    # claude_cli_command is an alias for anthropic_cli_command for clarity
+    claude_cli_command: str = ""  # if empty, falls back to anthropic_cli_command
+    claude_cli_login_timeout_sec: int = 300
+    claude_cli_url_capture_timeout_sec: int = 30
 
     codex_cli_command: str = "codex"
     codex_enable_api: bool = False
@@ -142,9 +148,9 @@ def get_settings() -> Settings:
     if settings.orchestration_mode not in {"rules", "agentic"}:
         validation_issues.append(("ORCHESTRATION_MODE", "must be one of: rules, agentic"))
 
-    if settings.master_agent_provider not in {"cursor_cli", "cursor_cloud", "anthropic", "codex"}:
+    if settings.master_agent_provider not in {"cursor_cli", "cursor_cloud", "anthropic", "claude_cli", "anthropic_api", "codex"}:
         validation_issues.append(
-            ("MASTER_AGENT_PROVIDER", "must be one of: cursor_cli, cursor_cloud, anthropic, codex")
+            ("MASTER_AGENT_PROVIDER", "must be one of: cursor_cli, cursor_cloud, claude_cli, anthropic_api, codex")
         )
 
     if settings.orchestration_mode == "agentic":
@@ -156,9 +162,9 @@ def get_settings() -> Settings:
             validation_issues.append(
                 ("CURSOR_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=cursor_cli")
             )
-        if settings.master_agent_provider == "anthropic" and not settings.anthropic_cli_command.strip():
+        if settings.master_agent_provider in {"anthropic", "claude_cli"} and not (settings.claude_cli_command or settings.anthropic_cli_command).strip():
             validation_issues.append(
-                ("ANTHROPIC_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=anthropic")
+                ("ANTHROPIC_CLI_COMMAND", "is required when ORCHESTRATION_MODE=agentic and MASTER_AGENT_PROVIDER=claude_cli")
             )
         if settings.master_agent_provider == "codex" and not settings.codex_cli_command.strip():
             validation_issues.append(

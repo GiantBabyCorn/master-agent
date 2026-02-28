@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -50,3 +51,12 @@ class ProviderAdapter(Protocol):
 
     def health(self) -> dict:
         ...
+
+    # Optional: providers that require interactive OAuth implement these.
+    def start_login(self) -> tuple[str | None, subprocess.Popen]:
+        """Start the interactive login process. Returns (url_or_none, process)."""
+        raise NotImplementedError
+
+    def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:
+        """Wait for the login process started by start_login() to complete."""
+        raise NotImplementedError

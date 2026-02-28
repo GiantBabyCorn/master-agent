@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -9,18 +10,15 @@ from app.core.config import get_settings
 from app.providers._login_helper import read_url_from_proc
 from app.providers.base import ProviderCapabilities, ProviderTaskRequest, ProviderTaskResult
 
-logger = logging.getLogger("master-agent.cursor_cli")
+logger = logging.getLogger("master-agent.claude_cli")
 
 AUTH_REQUIRED_MARKER = "AUTH_REQUIRED"
-_AUTH_KEYWORDS = ("authentication required", "agent login", "not authenticated")
-_OSC8_URL_PATTERN = re.compile(r"\x1b]8;;([^\x1b]+)\x1b\\")
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_LOGIN_URL_PATTERN = re.compile(r"https://cursor\.com/loginDeepControl\?[^\s<>'\"`]+")
-_LOGIN_URL_FALLBACK_PATTERN = re.compile(r"https://cursor\.com/loginDeepControl(?:\?[^\s<>'\"`]*)?")
+_AUTH_KEYWORDS = ("not logged in", "please log in", "not authenticated", "unauthorized", "authentication required")
+_LOGIN_URL_PATTERN = re.compile(r"https://claude\.ai/[^\s<>'\"`]+")
 
 
-class CursorCliProvider:
-    name = "cursor_cli"
+class ClaudeCliProvider:
+    name = "claude_cli"
     capabilities = ProviderCapabilities(
         supports_stream=False,
         supports_followup=False,
@@ -29,45 +27,32 @@ class CursorCliProvider:
         requires_local_workspace=True,
     )
 
+    def _cli_command(self) -> str:
+        settings = get_settings()
+        return (settings.claude_cli_command or settings.anthropic_cli_command or "claude").strip()
+
     @staticmethod
     def _is_auth_error(output: str) -> bool:
         lower = output.lower()
         return any(kw in lower for kw in _AUTH_KEYWORDS)
 
-    @staticmethod
-    def _extract_login_url(text: str) -> str | None:
-        """Extract a full Cursor login URL from plain text or OSC8 hyperlink escapes."""
-        # Some CLIs emit OSC8 hyperlinks where the visible text is shortened/truncated.
-        for match in _OSC8_URL_PATTERN.finditer(text):
-            candidate = match.group(1).strip()
-            if "https://cursor.com/loginDeepControl" in candidate and not candidate.endswith("?"):
-                return candidate
-
-        cleaned = _ANSI_ESCAPE_PATTERN.sub("", text)
-        collapsed = cleaned.replace("\n", "")
-        match = _LOGIN_URL_PATTERN.search(collapsed) or _LOGIN_URL_FALLBACK_PATTERN.search(collapsed)
-        if not match:
-            return None
-        candidate = match.group(0).strip().rstrip(".,)")
-        if candidate.endswith("?"):
-            return None
-        return candidate
-
     def launch_task(self, request: ProviderTaskRequest) -> ProviderTaskResult:
         settings = get_settings()
-        force = settings.cursor_cli_force_approve or (request.metadata or {}).get("force", False)
-        args = [settings.cursor_cli_command, "-p", "--trust", request.prompt]
-        if force:
-            args.insert(3, "--force")
-
+        cmd = self._cli_command()
+        args = [cmd, "-p", request.prompt]
+        env = None
+        if settings.anthropic_api_key:
+            env = os.environ.copy()
+            env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
         try:
             proc = subprocess.run(
                 args,
-                text=True,
                 capture_output=True,
-                timeout=settings.cursor_cli_timeout_ms / 1000.0,
+                text=True,
                 check=False,
+                timeout=settings.request_timeout_sec,
                 cwd=request.project_path or None,
+                env=env,
             )
         except Exception as exc:  # noqa: BLE001
             return ProviderTaskResult(success=False, output="", error=str(exc))
@@ -84,19 +69,20 @@ class CursorCliProvider:
         return ProviderTaskResult(
             success=proc.returncode == 0,
             output=proc.stdout or proc.stderr or "",
-            error=None if proc.returncode == 0 else proc.stderr or "Command failed",
+            error=None if proc.returncode == 0 else proc.stderr or "command failed",
             raw={"returncode": proc.returncode},
         )
 
     def start_login(self) -> tuple[str | None, subprocess.Popen]:
-        """Start `agent login` and capture the OAuth URL from stdout.
+        """Start `claude login` and capture the OAuth URL from stdout.
 
         Returns (url_or_none, process). The caller should wait on the process.
         Uses a background thread so output buffering never causes a missed URL.
         """
         settings = get_settings()
+        cmd = self._cli_command()
         proc = subprocess.Popen(
-            [settings.cursor_cli_command, "login"],
+            [cmd, "login"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -104,7 +90,7 @@ class CursorCliProvider:
         url = read_url_from_proc(
             proc,
             _LOGIN_URL_PATTERN,
-            timeout_sec=settings.cursor_cli_url_capture_timeout_sec,
+            timeout_sec=settings.claude_cli_url_capture_timeout_sec,
         )
         return url, proc
 
@@ -119,13 +105,13 @@ class CursorCliProvider:
             return False
 
     def get_task(self, external_run_id: str) -> ProviderTaskResult:
-        return ProviderTaskResult(success=False, output="", error="cursor_cli does not support remote get_task")
+        return ProviderTaskResult(success=False, output="", error="claude_cli does not support get_task")
 
     def followup_task(self, external_run_id: str, prompt: str) -> ProviderTaskResult:
-        return ProviderTaskResult(success=False, output="", error="cursor_cli does not support followup_task")
+        return ProviderTaskResult(success=False, output="", error="claude_cli does not support followup_task")
 
     def stop_task(self, external_run_id: str) -> ProviderTaskResult:
-        return ProviderTaskResult(success=False, output="", error="cursor_cli does not support stop_task")
+        return ProviderTaskResult(success=False, output="", error="claude_cli does not support stop_task")
 
     def list_tasks(self, limit: int = 20) -> list[dict]:
         return []

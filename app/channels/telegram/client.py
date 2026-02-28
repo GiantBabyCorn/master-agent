@@ -270,6 +270,27 @@ def delete_telegram_message(chat_id: int, message_id: int) -> bool:
     return data.get("ok", False)
 
 
+def set_my_commands(commands: list[dict]) -> bool:
+    """Register bot commands with Telegram so they appear in the / autocomplete menu.
+
+    Each entry in *commands* must have keys ``command`` (no leading slash) and
+    ``description`` (shown next to the command in the menu).
+    """
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return False
+    try:
+        data = _post_telegram(
+            "setMyCommands",
+            {"commands": commands},
+            timeout_sec=settings.request_timeout_sec,
+        )
+        return data.get("result", False) is True or data.get("ok", False)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to register Telegram bot commands")
+        return False
+
+
 def fetch_telegram_updates(offset: int | None = None) -> list[dict]:
     settings = get_settings()
     if not settings.telegram_bot_token:

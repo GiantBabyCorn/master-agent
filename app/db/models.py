@@ -69,7 +69,9 @@ class RiskLevel(enum.Enum):
 class ProviderKind(enum.Enum):
     CURSOR_CLOUD = "CURSOR_CLOUD"
     CURSOR_CLI = "CURSOR_CLI"
-    ANTHROPIC = "ANTHROPIC"
+    ANTHROPIC = "ANTHROPIC"  # Legacy — kept for backward compat with existing DB rows
+    CLAUDE_CLI = "CLAUDE_CLI"
+    ANTHROPIC_API = "ANTHROPIC_API"
     CODEX = "CODEX"
 
 

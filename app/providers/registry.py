@@ -6,8 +6,10 @@ import shutil
 import subprocess
 
 from app.core.config import get_settings
+from app.providers.anthropic_api_provider import AnthropicApiProvider
 from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ProviderAdapter
+from app.providers.claude_cli_provider import ClaudeCliProvider
 from app.providers.codex_provider import CodexProvider
 from app.providers.cursor_cli import CursorCliProvider
 from app.providers.cursor_cloud import CursorCloudProvider
@@ -18,6 +20,9 @@ class ProviderRegistry:
         self._providers: dict[str, ProviderAdapter] = {
             "cursor_cli": CursorCliProvider(),
             "cursor_cloud": CursorCloudProvider(),
+            "claude_cli": ClaudeCliProvider(),
+            "anthropic_api": AnthropicApiProvider(),
+            # Legacy alias kept for backward compatibility with existing DB rows / config
             "anthropic": AnthropicProvider(),
             "codex": CodexProvider(),
         }
@@ -81,6 +86,7 @@ class ProviderRegistry:
             return self._status_map
 
         settings = get_settings()
+        claude_cmd = (settings.claude_cli_command or settings.anthropic_cli_command or "claude").strip()
         self._status_map = {
             "cursor_cloud": self._verify_cursor_cloud(settings),
             "cursor_cli": self._verify_cli_provider(
@@ -88,10 +94,17 @@ class ProviderRegistry:
                 provider="cursor_cli",
                 required_env=[],
             ),
+            "claude_cli": self._verify_cli_provider(
+                command=claude_cmd,
+                provider="claude_cli",
+                required_env=[],  # OAuth is primary; API key is optional
+            ),
+            "anthropic_api": self._verify_anthropic_api(settings),
+            # Legacy alias — keep verifying so existing configs still show status
             "anthropic": self._verify_cli_provider(
                 command=settings.anthropic_cli_command,
                 provider="anthropic",
-                required_env=["ANTHROPIC_API_KEY"],
+                required_env=[],
             ),
             "codex": self._verify_cli_provider(
                 command=settings.codex_cli_command,
@@ -108,6 +121,22 @@ class ProviderRegistry:
                 else:
                     logger.warning("Provider %s unavailable: %s", provider_name, status["reason"])
         return self._status_map
+
+    def _verify_anthropic_api(self, settings) -> dict:
+        base = {
+            "provider": "anthropic_api",
+            "configured": bool(settings.anthropic_api_key),
+            "enabled": False,
+            "status": "unavailable",
+            "reason": None,
+            "verifiedAt": datetime.utcnow().isoformat(),
+        }
+        if not settings.anthropic_api_key:
+            base["reason"] = "ANTHROPIC_API_KEY is not configured"
+            return base
+        base["enabled"] = True
+        base["status"] = "available"
+        return base
 
     def _verify_cursor_cloud(self, settings) -> dict:
         base = {

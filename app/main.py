@@ -12,7 +12,7 @@ from app.api.routes_telegram import router as telegram_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.middlewares import CorrelationIdMiddleware
-from app.channels.telegram.client import get_telegram_webhook_info, delete_telegram_webhook
+from app.channels.telegram.client import delete_telegram_webhook, get_telegram_webhook_info, set_my_commands
 from app.channels.telegram.polling import TelegramPollingRunner
 from app.services.agent_watcher import CloudAgentWatcher
 from app.db.base import Base
@@ -105,6 +105,18 @@ def on_startup() -> None:
         logger.info("Telegram transport mode: webhook")
     else:
         logger.info("Telegram transport mode: disabled")
+
+    if settings.telegram_bot_token.strip():
+        set_my_commands([
+            {"command": "help", "description": "Show available commands"},
+            {"command": "providers", "description": "List provider status"},
+            {"command": "projects", "description": "List local projects"},
+            {"command": "run", "description": "Run a task: /run <provider> <prompt>"},
+            {"command": "login", "description": "Authenticate a provider: /login <provider>"},
+            {"command": "sync", "description": "Sync provider data: /sync <provider>"},
+            {"command": "agent", "description": "Manage agents: /agent <create|list|start|stop>"},
+            {"command": "config", "description": "CLI config: /config allowlist ..."},
+        ])
 
     global agent_watcher  # noqa: PLW0603
     if orchestrator.provider_registry.is_available("cursor_cloud"):
