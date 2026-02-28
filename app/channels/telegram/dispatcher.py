@@ -333,8 +333,15 @@ def _handle_cli_auth_required(
             f"Login required. Click to authenticate:\n{url}\n\n_Waiting up to {settings.cursor_cli_login_timeout_sec // 60} min..._",
         )
     else:
-        _respond(chat_id, "Login started but no URL was captured. Check server logs.", placeholder_id)
-        return
+        # Some CLI versions don't print a URL to stdout when not attached to a TTY.
+        # Keep waiting for login completion instead of failing immediately.
+        edit_telegram_message(
+            chat_id,
+            placeholder_id,
+            "Login required, but no URL was captured from CLI output.\n\n"
+            "Please complete login from the server terminal if a browser prompt appeared there.\n"
+            f"_Waiting up to {settings.cursor_cli_login_timeout_sec // 60} min..._",
+        )
 
     success = provider.wait_login(proc, timeout_sec=settings.cursor_cli_login_timeout_sec)
 
@@ -342,7 +349,8 @@ def _handle_cli_auth_required(
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            "Login timed out. Try your command again after authenticating.",
+            "Login did not complete in time.\n"
+            "Please run `agent login` in the server/container terminal once, then retry your Telegram command.",
         )
         return
 
