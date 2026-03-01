@@ -74,7 +74,7 @@ class ClaudeCliProvider:
         )
 
     def start_login(self) -> tuple[str | None, subprocess.Popen]:
-        """Start `claude login` and capture the OAuth URL via a PTY.
+        """Start `claude auth login` and capture the OAuth URL via a PTY.
 
         Returns (url_or_none, process). The caller should wait on the process.
         A PTY is used so the CLI detects a real terminal and emits the URL.
@@ -82,7 +82,7 @@ class ClaudeCliProvider:
         settings = get_settings()
         cmd = self._cli_command()
         url, proc = read_url_from_pty(
-            [cmd, "login"],
+            [cmd, "auth", "login"],
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.claude_cli_url_capture_timeout_sec,
         )
