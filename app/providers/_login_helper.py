@@ -28,8 +28,12 @@ class LoginSession:
         """Write *code* to the subprocess stdin so the CLI can complete auth.
 
         Works via the PTY master fd when available, falls back to PIPE stdin.
+        Uses ``\\r`` (carriage return) as the line terminator because interactive
+        CLIs typically run in raw terminal mode where Enter sends ``\\r``, not
+        ``\\n``.  The PTY line discipline (ICRNL) maps ``\\r`` → ``\\n`` for
+        CLIs in canonical mode, so ``\\r`` is safe for both modes.
         """
-        encoded = (code.strip() + "\n").encode()
+        encoded = (code.strip() + "\r").encode()
         if self._master_fd is not None:
             import os as _os
             try:
@@ -156,6 +160,16 @@ def read_url_from_pty(
     except OSError:
         # Some restricted container configurations disable PTY creation.
         return _read_url_pipe_fallback(cmd_args, url_pattern, timeout_sec)
+
+    # Set a wide terminal so CLIs that line-wrap at terminal width don't split
+    # long URLs (Claude's OAuth URL can exceed 300 characters).
+    try:
+        import fcntl as _fcntl
+        import struct as _struct
+        import termios as _termios
+        _fcntl.ioctl(slave_fd, _termios.TIOCSWINSZ, _struct.pack("HHHH", 50, 500, 0, 0))
+    except OSError:
+        pass
 
     try:
         proc = subprocess.Popen(

@@ -78,25 +78,67 @@ class ClaudeCliProvider:
         )
 
     def start_login(self) -> tuple[str | None, LoginSession]:
-        """Start `claude auth login` and capture the OAuth URL via a PTY.
+        """Start `claude` (interactive REPL) and capture the OAuth URL via a PTY.
+
+        `claude auth login` does not read the pasted auth code from stdin; the
+        code-paste prompt only appears in the interactive REPL.  Running bare
+        `claude` triggers the same OAuth flow but keeps the "Paste code here if
+        prompted >" input active so we can forward the user's code via the PTY.
 
         Returns (url_or_none, session). The caller should wait on the session.
-        A PTY is used so the CLI detects a real terminal and emits the URL.
         After the user visits the URL and gets an auth code, call
         session.send_code(code) to forward it to the waiting CLI process.
         """
         settings = get_settings()
         cmd = self._cli_command()
         url, session = read_url_from_pty(
-            [cmd, "auth", "login"],
+            [cmd],
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.claude_cli_url_capture_timeout_sec,
         )
         return url, session
 
     def wait_login(self, session: LoginSession, timeout_sec: int = 300) -> bool:
-        """Wait for the login process to complete. Returns True on success."""
-        return session.wait(timeout_sec)
+        """Wait for login to complete by polling `claude auth status`.
+
+        The interactive REPL does not exit after authentication, so we cannot
+        rely on process exit.  Instead we poll `claude auth status` (exit 0 =
+        authenticated) every few seconds.  Once authenticated, we kill the
+        REPL and return True.
+        """
+        import time as _time
+
+        cmd = self._cli_command()
+        deadline = _time.monotonic() + timeout_sec
+        poll_interval = 5.0
+
+        while _time.monotonic() < deadline:
+            # If the process exited on its own, honour its exit code.
+            if session.proc.poll() is not None:
+                return session.proc.returncode == 0
+
+            try:
+                r = subprocess.run(
+                    [cmd, "auth", "status"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if r.returncode == 0:
+                    session.kill()
+                    try:
+                        session.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+
+            _time.sleep(poll_interval)
+
+        session.kill()
+        return False
 
     def get_task(self, external_run_id: str) -> ProviderTaskResult:
         return ProviderTaskResult(success=False, output="", error="claude_cli does not support get_task")

@@ -447,8 +447,11 @@ def _handle_cli_auth_required(
                 "Please log in from the server terminal, then retry your command.",
             )
             return
-        edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
-        rerun_fn()
+        if rerun_fn is None:
+            edit_telegram_message(chat_id, placeholder_id, f"Login to *{escape_md(provider_name)}* successful\!")
+        else:
+            edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
+            rerun_fn()
 
     threading.Thread(target=_wait_and_retry, daemon=True).start()
 
@@ -645,7 +648,7 @@ def dispatch_telegram_command(
             _respond(chat_id, "Usage: `/login <provider>`\nExample: `/login cursor_cli` or `/login claude_cli`", placeholder_message_id)
             return
         login_provider = first_line_tokens[0]
-        _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, login_provider, lambda: None)
+        _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, login_provider, None)
         return
 
     if command == "/sync":
@@ -847,10 +850,11 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
             _record_channel_session(db, chat_id, user_id)
             pending["session"].send_code(text)
             _pending_logins.pop(chat_id, None)
-            reply_telegram_message(
+            # Edit the original auth placeholder so the user sees progress in-place.
+            edit_telegram_message(
                 chat_id,
+                pending["placeholder_id"],
                 "Code sent \u2014 waiting for login to complete\u2026",
-                message.message_id,
             )
             return
     elif pending:
