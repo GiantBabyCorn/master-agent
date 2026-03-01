@@ -6,7 +6,7 @@ import subprocess
 from datetime import datetime
 
 from app.core.config import get_settings
-from app.providers._login_helper import read_url_from_pty
+from app.providers._login_helper import LoginSession, read_url_from_pty
 from app.providers.base import ProviderCapabilities, ProviderTaskRequest, ProviderTaskResult
 
 logger = logging.getLogger("master-agent.cursor_cli")
@@ -88,29 +88,23 @@ class CursorCliProvider:
             raw={"returncode": proc.returncode},
         )
 
-    def start_login(self) -> tuple[str | None, subprocess.Popen]:
+    def start_login(self) -> tuple[str | None, LoginSession]:
         """Start `agent login` and capture the OAuth URL via a PTY.
 
-        Returns (url_or_none, process). The caller should wait on the process.
+        Returns (url_or_none, session). The caller should wait on the session.
         A PTY is used so the CLI detects a real terminal and emits the URL.
         """
         settings = get_settings()
-        url, proc = read_url_from_pty(
+        url, session = read_url_from_pty(
             [settings.cursor_cli_command, "login"],
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.cursor_cli_url_capture_timeout_sec,
         )
-        return url, proc
+        return url, session
 
-    def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:
+    def wait_login(self, session: LoginSession, timeout_sec: int = 300) -> bool:
         """Wait for the login process to complete. Returns True on success."""
-        try:
-            exit_code = proc.wait(timeout=timeout_sec)
-            return exit_code == 0
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            return False
+        return session.wait(timeout_sec)
 
     def get_task(self, external_run_id: str) -> ProviderTaskResult:
         return ProviderTaskResult(success=False, output="", error="cursor_cli does not support remote get_task")

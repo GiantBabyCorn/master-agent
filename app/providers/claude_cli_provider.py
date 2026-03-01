@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 
 from app.core.config import get_settings
-from app.providers._login_helper import read_url_from_pty
+from app.providers._login_helper import LoginSession, read_url_from_pty
 from app.providers.base import ProviderCapabilities, ProviderTaskRequest, ProviderTaskResult
 
 logger = logging.getLogger("master-agent.claude_cli")
@@ -19,6 +19,10 @@ _LOGIN_URL_PATTERN = re.compile(r"https://claude\.ai/[^\s<>'\"`]+")
 
 class ClaudeCliProvider:
     name = "claude_cli"
+    # Claude's OAuth flow shows a code on the website that must be pasted
+    # back into the terminal.  The dispatcher uses this flag to prompt the
+    # user to reply with the code after they open the login URL.
+    needs_auth_code = True
     capabilities = ProviderCapabilities(
         supports_stream=False,
         supports_followup=False,
@@ -39,7 +43,7 @@ class ClaudeCliProvider:
     def launch_task(self, request: ProviderTaskRequest) -> ProviderTaskResult:
         settings = get_settings()
         cmd = self._cli_command()
-        args = [cmd, "-p", request.prompt]
+        args = [cmd, "-p", "--dangerously-skip-permissions", request.prompt]
         env = None
         if settings.anthropic_api_key:
             env = os.environ.copy()
@@ -73,30 +77,26 @@ class ClaudeCliProvider:
             raw={"returncode": proc.returncode},
         )
 
-    def start_login(self) -> tuple[str | None, subprocess.Popen]:
+    def start_login(self) -> tuple[str | None, LoginSession]:
         """Start `claude auth login` and capture the OAuth URL via a PTY.
 
-        Returns (url_or_none, process). The caller should wait on the process.
+        Returns (url_or_none, session). The caller should wait on the session.
         A PTY is used so the CLI detects a real terminal and emits the URL.
+        After the user visits the URL and gets an auth code, call
+        session.send_code(code) to forward it to the waiting CLI process.
         """
         settings = get_settings()
         cmd = self._cli_command()
-        url, proc = read_url_from_pty(
+        url, session = read_url_from_pty(
             [cmd, "auth", "login"],
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.claude_cli_url_capture_timeout_sec,
         )
-        return url, proc
+        return url, session
 
-    def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:
+    def wait_login(self, session: LoginSession, timeout_sec: int = 300) -> bool:
         """Wait for the login process to complete. Returns True on success."""
-        try:
-            exit_code = proc.wait(timeout=timeout_sec)
-            return exit_code == 0
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            return False
+        return session.wait(timeout_sec)
 
     def get_task(self, external_run_id: str) -> ProviderTaskResult:
         return ProviderTaskResult(success=False, output="", error="claude_cli does not support get_task")

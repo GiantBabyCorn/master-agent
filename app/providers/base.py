@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from app.providers._login_helper import LoginSession
 
 
 @dataclass(frozen=True)
@@ -53,10 +55,16 @@ class ProviderAdapter(Protocol):
         ...
 
     # Optional: providers that require interactive OAuth implement these.
-    def start_login(self) -> tuple[str | None, subprocess.Popen]:
-        """Start the interactive login process. Returns (url_or_none, process)."""
+    def start_login(self) -> tuple[str | None, LoginSession]:
+        """Start the interactive login process.
+
+        Returns ``(url_or_none, session)``.  ``url`` is the OAuth URL to open
+        in a browser (or None if it could not be captured).  ``session`` is a
+        :class:`~app.providers._login_helper.LoginSession` that the caller
+        uses to forward the authentication code and to wait for completion.
+        """
         raise NotImplementedError
 
-    def wait_login(self, proc: subprocess.Popen, timeout_sec: int = 300) -> bool:
+    def wait_login(self, session: LoginSession, timeout_sec: int = 300) -> bool:
         """Wait for the login process started by start_login() to complete."""
         raise NotImplementedError

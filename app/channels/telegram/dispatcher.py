@@ -41,6 +41,10 @@ from app.utils.ids import new_id
 PENDING_PROMPT_TTL_SEC = 300
 _pending_prompts: dict[str, dict] = {}
 
+# Keyed by chat_id.  Holds the LoginSession for providers that require the
+# user to paste an authentication code back (e.g. claude_cli).
+_pending_logins: dict[int, dict] = {}
+
 REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+(?:@[\w.\-/]+)?$")
 
 
@@ -381,21 +385,32 @@ def _handle_cli_auth_required(
     _respond(chat_id, "Login required. Starting authentication...", placeholder_id)
 
     try:
-        url, proc = provider.start_login()
+        url, session = provider.start_login()
     except Exception as exc:  # noqa: BLE001
         _respond(chat_id, f"Failed to start login: `{escape_md(str(exc))}`", placeholder_id)
         return
 
-    # Determine login timeout from settings (cursor_cli has its own, claude_cli falls back)
+    # Determine login timeout from settings
     login_timeout = getattr(settings, f"{provider_name}_login_timeout_sec", None) or settings.cursor_cli_login_timeout_sec
     timeout_min = login_timeout // 60
 
+    # Does this provider need the user to paste a code back (e.g. claude_cli)?
+    needs_code = getattr(provider, "needs_auth_code", False)
+
     if url:
-        edit_telegram_message(
-            chat_id,
-            placeholder_id,
-            f"Tap the button below to log in to *{escape_md(provider_name)}*:",
-        )
+        if needs_code:
+            edit_telegram_message(
+                chat_id,
+                placeholder_id,
+                f"Tap the button below to open the *{escape_md(provider_name)}* login page.\n\n"
+                "The page will show an *Authentication Code* — copy it, then *reply to this message* with the code.",
+            )
+        else:
+            edit_telegram_message(
+                chat_id,
+                placeholder_id,
+                f"Tap the button below to log in to *{escape_md(provider_name)}*:",
+            )
         send_telegram_message_with_buttons(
             chat_id,
             f"_Waiting up to {timeout_min} min after you complete login..._",
@@ -412,8 +427,18 @@ def _handle_cli_auth_required(
             f"_Waiting up to {timeout_min} min for login to complete..._",
         )
 
+    # If a code is needed, register a pending_login so handle_telegram_update
+    # can forward the user's reply to the running subprocess.
+    if needs_code and url:
+        _pending_logins[chat_id] = {
+            "session": session,
+            "placeholder_id": placeholder_id,
+            "expires_at": time.time() + login_timeout,
+        }
+
     def _wait_and_retry() -> None:
-        success = provider.wait_login(proc, timeout_sec=login_timeout)
+        success = provider.wait_login(session, timeout_sec=login_timeout)
+        _pending_logins.pop(chat_id, None)  # clean up whether success or not
         if not success:
             edit_telegram_message(
                 chat_id,
@@ -811,6 +836,26 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
 
     chat_id = message.chat.id
     user_id = message.from_.id if message.from_ else None
+
+    # If this chat has a pending auth-code login, check whether the message
+    # is the code the user is pasting back.  Non-command messages (no leading
+    # '/') that arrive while a login is pending are treated as the auth code.
+    pending = _pending_logins.get(chat_id)
+    if pending and time.time() < pending["expires_at"]:
+        text = (message.text or "").strip()
+        if text and not text.startswith("/"):
+            _record_channel_session(db, chat_id, user_id)
+            pending["session"].send_code(text)
+            _pending_logins.pop(chat_id, None)
+            reply_telegram_message(
+                chat_id,
+                "Code sent \u2014 waiting for login to complete\u2026",
+                message.message_id,
+            )
+            return
+    elif pending:
+        _pending_logins.pop(chat_id, None)  # expired
+
     _record_channel_session(db, chat_id, user_id)
 
     db.add(

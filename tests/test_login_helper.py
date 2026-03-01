@@ -165,47 +165,47 @@ class TestReadUrlFromPty:
     def test_url_emitted_immediately(self):
         url = "https://example.com/auth?token=pty-immediate"
         script = f"import sys; print({url!r}); sys.stdout.flush()"
-        result, proc = read_url_from_pty(
+        result, session = read_url_from_pty(
             [sys.executable, "-c", script],
             _TEST_URL_PATTERN,
             timeout_sec=5.0,
         )
-        proc.wait(timeout=5)
+        session.proc.wait(timeout=5)
         assert result == url
 
     def test_url_emitted_after_delay(self):
         url = "https://example.com/auth?token=pty-delayed"
         script = f"import time, sys; time.sleep(0.3); print({url!r}); sys.stdout.flush()"
-        result, proc = read_url_from_pty(
+        result, session = read_url_from_pty(
             [sys.executable, "-c", script],
             _TEST_URL_PATTERN,
             timeout_sec=5.0,
         )
-        proc.wait(timeout=5)
+        session.proc.wait(timeout=5)
         assert result == url
 
     def test_no_url_returns_none(self):
         script = "print('nothing useful here')"
-        result, proc = read_url_from_pty(
+        result, session = read_url_from_pty(
             [sys.executable, "-c", script],
             _TEST_URL_PATTERN,
             timeout_sec=1.0,
         )
-        proc.wait(timeout=5)
+        session.proc.wait(timeout=5)
         assert result is None
 
     def test_timeout_returns_none(self):
         """Hanging process — PTY timeout fires and returns None."""
         script = "import time; time.sleep(999)"
         start = time.monotonic()
-        result, proc = read_url_from_pty(
+        result, session = read_url_from_pty(
             [sys.executable, "-c", script],
             _TEST_URL_PATTERN,
             timeout_sec=0.4,
         )
         elapsed = time.monotonic() - start
-        proc.kill()
-        proc.wait()
+        session.kill()
+        session.proc.wait()
         assert result is None
         assert elapsed < 2.0
 
@@ -219,10 +219,10 @@ class TestReadUrlFromPty:
             f"sys.stdout.write('\\x1b[32m{url}\\x1b[0m\\n')\n"
             "sys.stdout.flush()\n"
         )
-        result, proc = read_url_from_pty(
+        result, session = read_url_from_pty(
             [sys.executable, "-c", script],
             _TEST_URL_PATTERN,
             timeout_sec=5.0,
         )
-        proc.wait(timeout=5)
+        session.proc.wait(timeout=5)
         assert result == url
