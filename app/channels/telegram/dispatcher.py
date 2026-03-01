@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
+import threading
 import time
+
+logger = logging.getLogger("master-agent.telegram.dispatcher")
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +15,7 @@ from app.channels.telegram.client import (
     delete_telegram_message,
     edit_telegram_message,
     escape_md,
+    get_bot_username,
     reply_telegram_message,
     send_telegram_message,
     send_telegram_message_with_buttons,
@@ -39,12 +44,36 @@ _pending_prompts: dict[str, dict] = {}
 REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+(?:@[\w.\-/]+)?$")
 
 
+_open_access_warned = False
+
+
 def is_authorized_user(user_id: int | None) -> bool:
+    global _open_access_warned
     if not user_id:
         return False
-    allowed = get_settings().allowed_telegram_user_ids()
+    settings = get_settings()
+    allowed = settings.allowed_telegram_user_ids()
     if not allowed:
-        return True
+        # No allowlist configured — deny by default unless the operator has
+        # explicitly set TELEGRAM_ALLOW_ALL_USERS=true.
+        if settings.telegram_allow_all_users:
+            if not _open_access_warned:
+                _open_access_warned = True
+                logger.warning(
+                    "SECURITY: TELEGRAM_ALLOW_ALL_USERS=true — any Telegram user "
+                    "can trigger CLI commands on this server. "
+                    "Set TELEGRAM_ALLOWED_USER_IDS to restrict access."
+                )
+            return True
+        # Deny and log once so the operator knows why nobody can use the bot.
+        if not _open_access_warned:
+            _open_access_warned = True
+            logger.warning(
+                "SECURITY: TELEGRAM_ALLOWED_USER_IDS is not set and "
+                "TELEGRAM_ALLOW_ALL_USERS is false — all Telegram users are denied. "
+                "Add your Telegram user ID to TELEGRAM_ALLOWED_USER_IDS in .env."
+            )
+        return False
     return str(user_id) in allowed
 
 
@@ -287,16 +316,28 @@ def _respond(chat_id: int, text: str, placeholder_id: int | None) -> None:
 
 
 def _extract_command_and_body(text: str) -> tuple[str, str]:
-    """Split '/command arg1 arg2\\nrest of body' into (command, 'arg1 arg2\\nrest of body')."""
+    """Split '/command arg1 arg2\\nrest of body' into (command, 'arg1 arg2\\nrest of body').
+
+    Also strips the ``@BotName`` suffix that Telegram appends in group chats,
+    e.g. ``/login@MyBotName claude_cli`` → command ``/login``.
+    """
     stripped = text.strip()
     first_space = stripped.find(" ")
     first_newline = stripped.find("\n")
     if first_space < 0 and first_newline < 0:
-        return stripped, ""
-    split_at = first_space if first_space >= 0 else first_newline
-    if first_newline >= 0 and first_newline < split_at:
-        split_at = first_newline
-    return stripped[:split_at], stripped[split_at:].strip()
+        command = stripped
+        body = ""
+    else:
+        split_at = first_space if first_space >= 0 else first_newline
+        if first_newline >= 0 and first_newline < split_at:
+            split_at = first_newline
+        command = stripped[:split_at]
+        body = stripped[split_at:].strip()
+    # Strip @BotName suffix (present in group chats)
+    at = command.find("@")
+    if at > 0:
+        command = command[:at]
+    return command, body
 
 
 def _extract_first_line_tokens(body: str) -> tuple[list[str], str]:
@@ -362,28 +403,29 @@ def _handle_cli_auth_required(
             reply_to_message_id=placeholder_id,
         )
     else:
-        # Some CLI versions don't emit a URL to stdout when not attached to a TTY.
+        # PTY not available or CLI didn't emit a URL — user must log in manually.
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            f"Login required for *{escape_md(provider_name)}*, but no URL was captured from CLI output.\n\n"
-            "Please complete login from the server terminal if a browser prompt appeared there.\n"
-            f"_Waiting up to {timeout_min} min..._",
+            f"Login required for *{escape_md(provider_name)}*.\n\n"
+            "No URL was captured — please run the login command directly in the server terminal.\n"
+            f"_Waiting up to {timeout_min} min for login to complete..._",
         )
 
-    success = provider.wait_login(proc, timeout_sec=login_timeout)
+    def _wait_and_retry() -> None:
+        success = provider.wait_login(proc, timeout_sec=login_timeout)
+        if not success:
+            edit_telegram_message(
+                chat_id,
+                placeholder_id,
+                f"Login for *{escape_md(provider_name)}* did not complete in time.\n"
+                "Please log in from the server terminal, then retry your command.",
+            )
+            return
+        edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
+        rerun_fn()
 
-    if not success:
-        edit_telegram_message(
-            chat_id,
-            placeholder_id,
-            f"Login for *{escape_md(provider_name)}* did not complete in time.\n"
-            f"Please run the login command in the server/container terminal, then retry your Telegram command.",
-        )
-        return
-
-    edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
-    rerun_fn()
+    threading.Thread(target=_wait_and_retry, daemon=True).start()
 
 
 def _register_cloud_agent(db: Session, result, chat_id: int) -> None:
@@ -724,10 +766,48 @@ def dispatch_telegram_command(
     _respond(chat_id, "Unknown command. Use /help.", placeholder_message_id)
 
 
+def _command_bot_target(text: str) -> str | None:
+    """Return the lower-cased @BotName suffix from the command token, or None.
+
+    E.g. ``"/login@MyBot claude_cli"`` → ``"mybot"``
+         ``"/login claude_cli"``        → ``None``
+    """
+    stripped = text.strip()
+    end = len(stripped)
+    for ch in (" ", "\n"):
+        idx = stripped.find(ch)
+        if 0 <= idx < end:
+            end = idx
+    first_word = stripped[:end]
+    at = first_word.find("@")
+    if at > 0:
+        return first_word[at + 1:].lower()
+    return None
+
+
 def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: MasterOrchestrator) -> None:
     message = update.message
     if not message or not message.text:
         return
+
+    is_group = message.chat.type in ("group", "supergroup", "channel")
+    bot_target = _command_bot_target(message.text)
+
+    if is_group:
+        # In groups, ONLY respond to commands that explicitly name our bot
+        # (e.g. /login@OurBot).  This prevents accidental triggering when the
+        # bot is added to a shared group, and avoids conflicts with other bots.
+        if bot_target is None:
+            return  # No @BotName suffix — ignore silently in groups
+        our_username = get_bot_username()
+        if not our_username or bot_target != our_username:
+            return  # Named a different bot (or getMe failed) — ignore
+    elif bot_target is not None:
+        # Private chat with an explicit @BotName (unusual but valid) — still
+        # verify it's addressed to us, not another bot.
+        our_username = get_bot_username()
+        if our_username and bot_target != our_username:
+            return
 
     chat_id = message.chat.id
     user_id = message.from_.id if message.from_ else None

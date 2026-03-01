@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from app.providers._login_helper import _extract_url, read_url_from_proc
+from app.providers._login_helper import _extract_url, read_url_from_proc, read_url_from_pty
 
 _TEST_URL_PATTERN = re.compile(r"https://example\.com/auth\?[^\s]+")
 _CURSOR_URL_PATTERN = re.compile(r"https://cursor\.com/loginDeepControl\?[^\s<>'\"`]+")
@@ -56,6 +56,29 @@ class TestExtractUrl:
         result = _extract_url(text, _TEST_URL_PATTERN)
         assert result is not None
         assert not result.endswith(")")
+
+    def test_ansi_escape_stripped(self):
+        """URL wrapped in ANSI colour codes is still found."""
+        url = "https://example.com/auth?token=ansi"
+        # ESC[32m ... ESC[0m (green text)
+        text = f"\x1b[32m{url}\x1b[0m"
+        result = _extract_url(text, _TEST_URL_PATTERN)
+        assert result == url
+
+    def test_osc8_hyperlink_extracted(self):
+        """URL embedded in an OSC8 hyperlink escape sequence is returned."""
+        url = "https://example.com/auth?token=osc8"
+        # OSC8: ESC ] 8 ; ; URL ST visible_text ESC ] 8 ; ; ST
+        osc8 = f"\x1b]8;;{url}\x1b\\Click here\x1b]8;;\x1b\\"
+        result = _extract_url(osc8, _TEST_URL_PATTERN)
+        assert result == url
+
+    def test_osc8_cursor_url(self):
+        """Cursor loginDeepControl URL inside an OSC8 hyperlink is returned."""
+        url = "https://cursor.com/loginDeepControl?uuid=abc123&nonce=xyz"
+        osc8 = f"\x1b]8;;{url}\x1b\\Open\x1b]8;;\x1b\\"
+        result = _extract_url(osc8, _CURSOR_URL_PATTERN)
+        assert result == url
 
 
 # ---------------------------------------------------------------------------
@@ -130,3 +153,76 @@ class TestReadUrlFromProc:
         proc = _proc(f"print({url1!r}); print({url2!r})")
         result = read_url_from_proc(proc, _TEST_URL_PATTERN, timeout_sec=5.0)
         assert result == url1
+
+
+# ---------------------------------------------------------------------------
+# read_url_from_pty integration tests
+# On Windows (no pty module) these fall back to PIPE and test that path.
+# On Linux/macOS they exercise the real PTY path.
+# ---------------------------------------------------------------------------
+
+class TestReadUrlFromPty:
+    def test_url_emitted_immediately(self):
+        url = "https://example.com/auth?token=pty-immediate"
+        script = f"import sys; print({url!r}); sys.stdout.flush()"
+        result, proc = read_url_from_pty(
+            [sys.executable, "-c", script],
+            _TEST_URL_PATTERN,
+            timeout_sec=5.0,
+        )
+        proc.wait(timeout=5)
+        assert result == url
+
+    def test_url_emitted_after_delay(self):
+        url = "https://example.com/auth?token=pty-delayed"
+        script = f"import time, sys; time.sleep(0.3); print({url!r}); sys.stdout.flush()"
+        result, proc = read_url_from_pty(
+            [sys.executable, "-c", script],
+            _TEST_URL_PATTERN,
+            timeout_sec=5.0,
+        )
+        proc.wait(timeout=5)
+        assert result == url
+
+    def test_no_url_returns_none(self):
+        script = "print('nothing useful here')"
+        result, proc = read_url_from_pty(
+            [sys.executable, "-c", script],
+            _TEST_URL_PATTERN,
+            timeout_sec=1.0,
+        )
+        proc.wait(timeout=5)
+        assert result is None
+
+    def test_timeout_returns_none(self):
+        """Hanging process — PTY timeout fires and returns None."""
+        script = "import time; time.sleep(999)"
+        start = time.monotonic()
+        result, proc = read_url_from_pty(
+            [sys.executable, "-c", script],
+            _TEST_URL_PATTERN,
+            timeout_sec=0.4,
+        )
+        elapsed = time.monotonic() - start
+        proc.kill()
+        proc.wait()
+        assert result is None
+        assert elapsed < 2.0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="ANSI output only relevant on Unix PTY")
+    def test_ansi_wrapped_url_found(self):
+        """URL wrapped in ANSI escape codes (as emitted via PTY) is still captured."""
+        url = "https://example.com/auth?token=ansi-pty"
+        # Subprocess emits the URL wrapped in green ANSI colour codes
+        script = (
+            "import sys\n"
+            f"sys.stdout.write('\\x1b[32m{url}\\x1b[0m\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        result, proc = read_url_from_pty(
+            [sys.executable, "-c", script],
+            _TEST_URL_PATTERN,
+            timeout_sec=5.0,
+        )
+        proc.wait(timeout=5)
+        assert result == url

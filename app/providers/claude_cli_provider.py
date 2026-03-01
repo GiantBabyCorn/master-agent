@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 
 from app.core.config import get_settings
-from app.providers._login_helper import read_url_from_proc
+from app.providers._login_helper import read_url_from_pty
 from app.providers.base import ProviderCapabilities, ProviderTaskRequest, ProviderTaskResult
 
 logger = logging.getLogger("master-agent.claude_cli")
@@ -74,21 +74,15 @@ class ClaudeCliProvider:
         )
 
     def start_login(self) -> tuple[str | None, subprocess.Popen]:
-        """Start `claude login` and capture the OAuth URL from stdout.
+        """Start `claude login` and capture the OAuth URL via a PTY.
 
         Returns (url_or_none, process). The caller should wait on the process.
-        Uses a background thread so output buffering never causes a missed URL.
+        A PTY is used so the CLI detects a real terminal and emits the URL.
         """
         settings = get_settings()
         cmd = self._cli_command()
-        proc = subprocess.Popen(
+        url, proc = read_url_from_pty(
             [cmd, "login"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        url = read_url_from_proc(
-            proc,
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.claude_cli_url_capture_timeout_sec,
         )

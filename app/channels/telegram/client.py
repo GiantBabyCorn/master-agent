@@ -270,6 +270,33 @@ def delete_telegram_message(chat_id: int, message_id: int) -> bool:
     return data.get("ok", False)
 
 
+_bot_username: str | None = None  # lazily cached after first getMe call
+
+
+def get_bot_username() -> str | None:
+    """Return this bot's own username (lower-cased), or None if unavailable.
+
+    Result is cached in-process so ``getMe`` is only called once.
+    """
+    global _bot_username
+    if _bot_username is not None:
+        return _bot_username
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return None
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(telegram_api_url("getMe"))
+            response.raise_for_status()
+            data = response.json()
+        username = (data.get("result") or {}).get("username") or ""
+        _bot_username = username.lower() if username else None
+        return _bot_username
+    except Exception:  # noqa: BLE001
+        logger.warning("getMe failed — bot username unknown")
+        return None
+
+
 def set_my_commands(commands: list[dict]) -> bool:
     """Register bot commands with Telegram so they appear in the / autocomplete menu.
 

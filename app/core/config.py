@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     telegram_webhook_url: str = ""
     telegram_allowed_user_ids: str = ""
+    # Set to true ONLY if you intentionally want any Telegram user to be able
+    # to use this bot.  Ignored when telegram_allowed_user_ids is non-empty.
+    telegram_allow_all_users: bool = False
     telegram_mode: str = "webhook"
     telegram_poll_interval_sec: float = 3
     telegram_polling_timeout_sec: int = 30
