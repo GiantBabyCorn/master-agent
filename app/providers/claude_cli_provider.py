@@ -95,6 +95,16 @@ class ClaudeCliProvider:
             [cmd],
             _LOGIN_URL_PATTERN,
             timeout_sec=settings.claude_cli_url_capture_timeout_sec,
+            # Navigate the two interactive menus that appear before the OAuth URL:
+            #   1. Theme selection  — press Enter to accept the highlighted default.
+            #   2. Login method     — press Enter to accept option 1 ("Claude account
+            #                         with subscription").
+            # Each step waits up to 8 s for its trigger; if the menu never appears
+            # (e.g. theme was already saved from a prior run) the step is skipped.
+            interactions=[
+                ("theme", "\r"),        # Step 1: theme selection menu
+                ("subscription", "\r"), # Step 2: login method menu
+            ],
         )
         return url, session
 

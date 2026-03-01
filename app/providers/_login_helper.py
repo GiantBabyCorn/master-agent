@@ -132,6 +132,8 @@ def read_url_from_pty(
     cmd_args: list[str],
     url_pattern: re.Pattern,
     timeout_sec: float = 30.0,
+    interactions: list[tuple[str, str]] | None = None,
+    interaction_timeout_sec: float = 8.0,
 ) -> tuple[str | None, LoginSession]:
     """Spawn *cmd_args* inside a PTY so the CLI thinks it's in a real terminal.
 
@@ -144,8 +146,16 @@ def read_url_from_pty(
     later write an authentication code back to the subprocess via
     ``session.send_code(code)``.
 
+    *interactions* is an optional list of ``(trigger_text, response)`` pairs.
+    The reader processes them in order: when *trigger_text* appears in new PTY
+    output, *response* is written to the PTY master fd (simulating a keystroke).
+    Each interaction waits at most *interaction_timeout_sec* for its trigger;
+    if the trigger never appears, the interaction is skipped so the next one
+    can be attempted.  This lets callers navigate interactive menus (e.g. theme
+    selection, login method selection) that appear before the OAuth URL.
+
     On Windows (no ``pty`` module) or if ``openpty()`` raises, falls back to
-    plain ``subprocess.PIPE``.
+    plain ``subprocess.PIPE`` (interactions are not supported in fallback mode).
 
     Returns ``(url_or_none, session)``.
     """
@@ -206,9 +216,39 @@ def read_url_from_pty(
     t = threading.Thread(target=_pty_reader, daemon=True)
     t.start()
 
+    # Interaction state: remaining steps to process, search offset into decoded
+    # text, and when we started waiting for the current step's trigger.
+    remaining = list(interactions or [])
+    search_offset = 0           # char index — only search new text for each trigger
+    step_started = time.monotonic()
+
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
         combined = b"".join(chunks).decode("utf-8", errors="replace")
+
+        # Drive through interactive menus before looking for the URL.
+        while remaining:
+            trigger, response = remaining[0]
+            new_text = combined[search_offset:]
+
+            if trigger.lower() in new_text.lower():
+                # Trigger found — send the response keystroke.
+                try:
+                    _os.write(master_fd, response.encode())
+                except OSError:
+                    pass
+                remaining.pop(0)
+                search_offset = len(combined)
+                step_started = time.monotonic()
+            elif time.monotonic() - step_started > interaction_timeout_sec:
+                # Trigger never appeared — skip this step (menu may not exist).
+                remaining.pop(0)
+                step_started = time.monotonic()
+                # Don't advance search_offset: the next trigger might already
+                # be visible in the accumulated text.
+            else:
+                break  # Still waiting for this trigger.
+
         url = _extract_url(combined, url_pattern)
         if url:
             return url, session
