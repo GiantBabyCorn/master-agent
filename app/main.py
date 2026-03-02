@@ -6,6 +6,7 @@ from sqlalchemy import inspect
 
 from app.api.routes_control import router as control_router
 from app.api.routes_agents import router as agents_router
+from app.api.routes_github import router as github_router
 from app.api.routes_health import router as health_router
 from app.api.routes_projects import router as projects_router
 from app.api.routes_telegram import router as telegram_router
@@ -15,6 +16,7 @@ from app.core.middlewares import CorrelationIdMiddleware
 from app.channels.telegram.client import delete_telegram_webhook, get_telegram_webhook_info, set_my_commands
 from app.channels.telegram.polling import TelegramPollingRunner
 from app.services.agent_watcher import CloudAgentWatcher
+from app.services.scheduler import TaskScheduler
 from app.db.base import Base
 from app.db.session import engine
 from app.orchestrator.deps import get_orchestrator
@@ -26,6 +28,7 @@ app = FastAPI(title="Master Agent API", version="0.1.0")
 logger = logging.getLogger("master-agent")
 polling_runner: TelegramPollingRunner | None = None
 agent_watcher: CloudAgentWatcher | None = None
+task_scheduler: TaskScheduler | None = None
 
 
 def _maybe_revoke_stale_webhook() -> None:
@@ -126,6 +129,11 @@ def on_startup() -> None:
         agent_watcher = CloudAgentWatcher(poll_interval_sec=settings.cursor_cloud_poll_interval_sec)
         agent_watcher.start()
 
+    global task_scheduler  # noqa: PLW0603
+    if settings.scheduled_tasks.strip():
+        task_scheduler = TaskScheduler(orchestrator)
+        task_scheduler.start()
+
     logger.info("Master Agent API started")
 
 
@@ -139,6 +147,10 @@ def on_shutdown() -> None:
     if agent_watcher is not None:
         agent_watcher.stop()
         agent_watcher = None
+    global task_scheduler  # noqa: PLW0603
+    if task_scheduler is not None:
+        task_scheduler.stop()
+        task_scheduler = None
 
 
 app.add_middleware(CorrelationIdMiddleware)
@@ -146,4 +158,5 @@ app.include_router(health_router)
 app.include_router(projects_router)
 app.include_router(agents_router)
 app.include_router(telegram_router)
+app.include_router(github_router)
 app.include_router(control_router)

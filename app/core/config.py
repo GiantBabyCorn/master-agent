@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     db_auto_create_tables: bool = True
     db_enable_startup_migration_gate: bool = True
 
+    # GitHub webhook integration
+    github_webhook_secret: str = ""
+    github_default_provider: str = "claude_cli"
+    github_notify_chat_id: int = 0  # Telegram chat_id to notify on triggered tasks (0 = disabled)
+    github_auto_run_on_push: bool = False
+    github_auto_run_on_pr: bool = False
+    github_mention_trigger: str = "@claude"  # keyword in issue comments that triggers a task
+
+    # Scheduled tasks — JSON array of {name, provider, prompt, interval_sec, notify_chat_id}
+    # Example: '[{"name":"daily","provider":"claude_cli","prompt":"Review code","interval_sec":86400}]'
+    scheduled_tasks: str = ""
+
     def allowed_telegram_user_ids(self) -> Set[str]:
         return {user_id.strip() for user_id in self.telegram_allowed_user_ids.split(",") if user_id.strip()}
 
