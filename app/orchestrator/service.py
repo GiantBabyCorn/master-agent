@@ -135,7 +135,19 @@ class MasterOrchestrator:
             if existing is not None:
                 return existing
 
-        decision = evaluate_policy(PolicyInput(prompt=prompt, provider=provider))
+        # --force (metadata["force"]=True) bypasses policy evaluation entirely.
+        # This is used by the Telegram "Approve" button and the --force CLI flag.
+        if (metadata or {}).get("force"):
+            from app.db.models import RiskLevel as _RL
+            from app.policy.engine import PolicyDecisionResult as _PDR
+            decision = _PDR(
+                risk_level=_RL.LOW,
+                allowed=True,
+                requires_approval=False,
+                reason="Policy bypassed by force flag",
+            )
+        else:
+            decision = evaluate_policy(PolicyInput(prompt=prompt, provider=provider))
         task = AgentTask(
             id=new_id(),
             provider=PROVIDER_KIND_MAP.get(provider, ProviderKind.CURSOR_CLI),

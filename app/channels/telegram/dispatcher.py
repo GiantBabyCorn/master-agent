@@ -47,6 +47,10 @@ _pending_prompts: dict[str, dict] = {}
 # user to paste an authentication code back (e.g. claude_cli).
 _pending_logins: dict[int, dict] = {}
 
+# Keyed by task_id.  Holds context for tasks blocked pending human approval so
+# the Approve/Reject Telegram buttons can re-submit or cancel them.
+_pending_approvals: dict[str, dict] = {}
+
 REPO_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+(?:@[\w.\-/]+)?$")
 
 
@@ -556,6 +560,45 @@ def _cache_task(task_id: str, provider: str, prompt: str, metadata: dict, chat_i
         del _task_cache[next(iter(_task_cache))]
 
 
+def _send_approval_buttons(
+    chat_id: int,
+    task_id: str,
+    reason: str,
+    provider: str,
+    prompt: str,
+    metadata: dict,
+    placeholder_id: int | None,
+    requested_by: str | None,
+) -> None:
+    """Edit the placeholder with approval info and send [✅ Approve] [❌ Reject] buttons."""
+    _pending_approvals[task_id] = {
+        "provider": provider,
+        "prompt": prompt,
+        "metadata": metadata,
+        "requested_by": requested_by,
+        "chat_id": chat_id,
+    }
+    prompt_short = (prompt[:60] + "…") if len(prompt) > 60 else prompt
+    if placeholder_id:
+        edit_telegram_message(
+            chat_id,
+            placeholder_id,
+            f"⏳ *Approval required* — `{escape_md(provider)}`\n"
+            f"Task: `{task_id[:8]}`\n"
+            f"Reason: _{escape_md(reason)}_\n\n"
+            f"Prompt: `{escape_md(prompt_short)}`",
+        )
+    send_telegram_message_with_buttons(
+        chat_id,
+        "Approve or reject this task:",
+        [[
+            {"text": "✅ Approve", "callback_data": f"approve:{task_id}"},
+            {"text": "❌ Reject", "callback_data": f"reject:{task_id}"},
+        ]],
+        reply_to_message_id=placeholder_id,
+    )
+
+
 def _send_task_action_buttons(chat_id: int, task_id: str, reply_to_message_id: int | None = None) -> None:
     """Send [🔁 Retry] [📄 Export] inline buttons as a follow-up to a task result."""
     send_telegram_message_with_buttons(
@@ -748,7 +791,11 @@ def dispatch_telegram_command(
             _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, provider, _run_task)
             return
         if result.approval_required:
-            _respond(chat_id, f"⏳ *Approval required*\nTask: `{result.task_id}`\nReason: {escape_md(result.error or '')}", placeholder_message_id)
+            _send_approval_buttons(
+                chat_id, result.task_id, result.error or "Approval required",
+                provider, prompt, metadata, placeholder_message_id,
+                f"telegram:{chat_id}",
+            )
             return
         if provider == "cursor_cloud" and result.external_run_id:
             _register_cloud_agent(db, result, chat_id)
@@ -1144,7 +1191,11 @@ def handle_telegram_callback(
                 metadata=metadata,
             )
             if result.approval_required:
-                _respond(chat_id, f"⏳ *Approval required*\nTask: `{result.task_id}`\nReason: {escape_md(result.error or '')}", placeholder_id)
+                _send_approval_buttons(
+                    chat_id, result.task_id, result.error or "Approval required",
+                    provider, prompt, metadata, placeholder_id,
+                    f"telegram:{chat_id}",
+                )
             else:
                 if provider == "cursor_cloud" and result.external_run_id:
                     _register_cloud_agent(db, result, chat_id)
@@ -1182,7 +1233,11 @@ def handle_telegram_callback(
             if result.error and AUTH_REQUIRED_MARKER in result.error:
                 _handle_cli_auth_required(chat_id, placeholder_id, orchestrator, provider, None)
             elif result.approval_required:
-                _respond(chat_id, f"⏳ *Approval required*\nTask: `{result.task_id}`\nReason: {escape_md(result.error or '')}", placeholder_id)
+                _send_approval_buttons(
+                    chat_id, result.task_id, result.error or "Approval required",
+                    provider, prompt, metadata, placeholder_id,
+                    f"telegram:{chat_id}",
+                )
             else:
                 _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
                 if result.task_id:
@@ -1194,3 +1249,38 @@ def handle_telegram_callback(
     elif data.startswith("export:"):
         task_id = data[len("export:"):]
         _export_task(db, chat_id, task_id, None)
+
+    elif data.startswith("approve:"):
+        task_id = data[len("approve:"):]
+        pending = _pending_approvals.pop(task_id, None)
+        if message:
+            delete_telegram_message(chat_id, message.message_id)
+        if not pending:
+            send_telegram_message(chat_id, "Approval request expired or not found.")
+            return
+        placeholder_id = send_telegram_message(chat_id, "Approved — running task...")
+        provider = pending["provider"]
+        prompt = pending["prompt"]
+        metadata = {**(pending.get("metadata") or {}), "force": True}
+        try:
+            result = orchestrator.submit_task(
+                db,
+                provider=provider,
+                prompt=prompt,
+                requested_by=pending.get("requested_by") or f"telegram:{chat_id}",
+                idempotency_key=None,
+                metadata=metadata,
+            )
+            _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+            if result.task_id:
+                _cache_task(result.task_id, provider, prompt, metadata, chat_id)
+                _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
+        except Exception as exc:  # noqa: BLE001
+            _respond(chat_id, f"Task failed after approval: `{escape_md(str(exc))}`", placeholder_id)
+
+    elif data.startswith("reject:"):
+        task_id = data[len("reject:"):]
+        _pending_approvals.pop(task_id, None)
+        if message:
+            delete_telegram_message(chat_id, message.message_id)
+        send_telegram_message(chat_id, f"❌ Task `{task_id[:8]}` rejected.")
