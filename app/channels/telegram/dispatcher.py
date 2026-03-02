@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime
 
 logger = logging.getLogger("master-agent.telegram.dispatcher")
 
@@ -17,12 +18,13 @@ from app.channels.telegram.client import (
     escape_md,
     get_bot_username,
     reply_telegram_message,
+    send_telegram_document,
     send_telegram_message,
     send_telegram_message_with_buttons,
     send_threaded_response,
 )
 from app.core.config import get_settings
-from app.db.models import ChannelSession, LogLevel, Message, MessageDirection, MessageSource, Project, ProviderAgent, ProviderKind, TaskStatus
+from app.db.models import AgentTask, ChannelSession, LogLevel, Message, MessageDirection, MessageSource, PolicyDecision, Project, ProviderAgent, ProviderKind, RiskLevel, TaskStatus
 from app.orchestrator.service import MasterOrchestrator
 from app.schemas.telegram import TelegramCallbackQuery, TelegramUpdate
 from app.services.agent_control_service import (
@@ -179,6 +181,11 @@ def _help_text() -> str:
             "*Authentication:*",
             "`/login <provider>` — Authenticate a provider (OAuth)",
             "  Ex: `/login cursor_cli` or `/login claude_cli`",
+            "",
+            "*Task history:*",
+            "`/history [N]` — List recent tasks (default 10)",
+            "`/export <task_id>` — Export task as a markdown document",
+            "`/audit [N]` — Show recent policy decisions (default 10)",
         ]
     )
 
@@ -511,6 +518,111 @@ def _format_cloud_agent_line(item: dict) -> str:
     return "\n".join(parts)
 
 
+_task_cache: dict[str, dict] = {}  # task_id → {provider, prompt, metadata, chat_id}
+_TASK_CACHE_MAX = 50
+
+_STATUS_ICONS: dict[TaskStatus, str] = {
+    TaskStatus.SUCCEEDED: "✅",
+    TaskStatus.FAILED: "❌",
+    TaskStatus.PENDING: "⏳",
+    TaskStatus.RUNNING: "⏳",
+    TaskStatus.BLOCKED: "🚫",
+    TaskStatus.CANCELLED: "🚫",
+}
+
+_RISK_ICONS: dict[RiskLevel, str] = {
+    RiskLevel.LOW: "🟢",
+    RiskLevel.MEDIUM: "🟡",
+    RiskLevel.HIGH: "🔴",
+}
+
+
+def _format_age(dt: datetime) -> str:
+    """Return a human-readable age string, e.g. '5m ago', '2h ago'."""
+    secs = int((datetime.utcnow() - dt).total_seconds())
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _cache_task(task_id: str, provider: str, prompt: str, metadata: dict, chat_id: int) -> None:
+    """Store task details for later retry/export lookups."""
+    _task_cache[task_id] = {"provider": provider, "prompt": prompt, "metadata": metadata, "chat_id": chat_id}
+    if len(_task_cache) > _TASK_CACHE_MAX:
+        del _task_cache[next(iter(_task_cache))]
+
+
+def _send_task_action_buttons(chat_id: int, task_id: str, reply_to_message_id: int | None = None) -> None:
+    """Send [🔁 Retry] [📄 Export] inline buttons as a follow-up to a task result."""
+    send_telegram_message_with_buttons(
+        chat_id,
+        "Actions:",
+        [[
+            {"text": "🔁 Retry", "callback_data": f"retry:{task_id}"},
+            {"text": "📄 Export", "callback_data": f"export:{task_id}"},
+        ]],
+        reply_to_message_id=reply_to_message_id,
+    )
+
+
+def _export_task(db: Session, chat_id: int, task_id_or_prefix: str, placeholder_id: int | None) -> None:
+    """Build a Markdown export of an AgentTask and send it as a document."""
+    task = db.get(AgentTask, task_id_or_prefix)
+    if task is None:
+        rows = list(db.scalars(
+            select(AgentTask).where(AgentTask.id.like(f"{task_id_or_prefix}%")).limit(2)
+        ).all())
+        if not rows:
+            _respond(chat_id, f"Task not found: `{escape_md(task_id_or_prefix)}`", placeholder_id)
+            return
+        if len(rows) > 1:
+            ids = ", ".join(f"`{r.id[:8]}`" for r in rows)
+            _respond(chat_id, f"Ambiguous — multiple tasks match: {ids}", placeholder_id)
+            return
+        task = rows[0]
+
+    lines = [
+        f"# Task Export: {task.id}",
+        "",
+        f"**Provider:** {task.provider.value.lower()}",
+        f"**Status:** {task.status.value}",
+        f"**Risk Level:** {task.risk_level.value}",
+        f"**Requested by:** {task.requested_by or 'unknown'}",
+        f"**Created:** {task.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+        "",
+        "## Prompt",
+        "",
+        task.prompt,
+    ]
+    if task.result_text:
+        lines += ["", "## Result", "", task.result_text]
+    if task.error_text:
+        lines += ["", "## Error", "", task.error_text]
+
+    decisions = list(db.scalars(
+        select(PolicyDecision)
+        .where(PolicyDecision.task_id == task.id)
+        .order_by(PolicyDecision.created_at)
+    ).all())
+    if decisions:
+        lines += ["", "## Policy Decisions", ""]
+        for d in decisions:
+            verdict = "ALLOWED" if d.allowed else "BLOCKED"
+            lines.append(f"- {d.risk_level.value} — `{d.policy_name}` — {verdict}")
+            if d.reason:
+                lines.append(f"  Reason: {d.reason}")
+
+    content = "\n".join(lines)
+    caption = f"{task.status.value} · {task.provider.value.lower()} · {task.id[:8]}"
+    if placeholder_id:
+        edit_telegram_message(chat_id, placeholder_id, f"📄 Exported task `{task.id[:8]}`")
+    send_telegram_document(chat_id, f"task_{task.id[:8]}.md", content, caption=caption)
+
+
 def dispatch_telegram_command(
     db: Session,
     chat_id: int,
@@ -641,6 +753,9 @@ def dispatch_telegram_command(
         if provider == "cursor_cloud" and result.external_run_id:
             _register_cloud_agent(db, result, chat_id)
         _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_message_id)
+        if result.task_id:
+            _cache_task(result.task_id, provider, prompt, metadata, chat_id)
+            _send_task_action_buttons(chat_id, result.task_id, placeholder_message_id)
         return
 
     if command == "/login":
@@ -785,6 +900,66 @@ def dispatch_telegram_command(
             return
 
         _respond(chat_id, "Unknown /agent subcommand. Use /help.", placeholder_message_id)
+        return
+
+    if command == "/history":
+        n = 10
+        if first_line_tokens:
+            try:
+                n = int(first_line_tokens[0])
+            except ValueError:
+                pass
+        n = min(max(n, 1), 50)
+        tasks = list(db.scalars(
+            select(AgentTask).order_by(AgentTask.created_at.desc()).limit(n)
+        ).all())
+        if not tasks:
+            _respond(chat_id, "No tasks found.", placeholder_message_id)
+            return
+        lines = [f"*Recent tasks ({len(tasks)}):*"]
+        for i, task in enumerate(tasks, 1):
+            icon = _STATUS_ICONS.get(task.status, "❓")
+            provider_name = task.provider.value.lower()
+            prompt_short = (task.prompt[:40] + "…") if len(task.prompt) > 40 else task.prompt
+            age = _format_age(task.created_at)
+            tid = task.id[:8]
+            lines.append(
+                f"{i}. {icon} `{provider_name}` — {escape_md(prompt_short)} _{age}_ `{tid}`"
+            )
+        _respond(chat_id, "\n".join(lines), placeholder_message_id)
+        return
+
+    if command == "/export":
+        if not first_line_tokens:
+            _respond(chat_id, "Usage: `/export <task_id>`", placeholder_message_id)
+            return
+        _export_task(db, chat_id, first_line_tokens[0], placeholder_message_id)
+        return
+
+    if command == "/audit":
+        n = 10
+        if first_line_tokens:
+            try:
+                n = int(first_line_tokens[0])
+            except ValueError:
+                pass
+        n = min(max(n, 1), 50)
+        decisions = list(db.scalars(
+            select(PolicyDecision).order_by(PolicyDecision.created_at.desc()).limit(n)
+        ).all())
+        if not decisions:
+            _respond(chat_id, "No policy decisions recorded.", placeholder_message_id)
+            return
+        lines = [f"*Policy decisions ({len(decisions)}):*"]
+        for d in decisions:
+            icon = _RISK_ICONS.get(d.risk_level, "⚪")
+            verdict = "✅ allowed" if d.allowed else "🚫 blocked"
+            age = _format_age(d.created_at)
+            lines.append(f"{icon} `{d.policy_name}` — {verdict} _{age}_")
+            lines.append(f"  Task: `{d.task_id[:8]}`")
+            if d.reason:
+                lines.append(f"  _{escape_md(d.reason[:80])}_")
+        _respond(chat_id, "\n".join(lines), placeholder_message_id)
         return
 
     if command == "/config":
@@ -974,6 +1149,9 @@ def handle_telegram_callback(
                 if provider == "cursor_cloud" and result.external_run_id:
                     _register_cloud_agent(db, result, chat_id)
                 _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+                if result.task_id:
+                    _cache_task(result.task_id, provider, prompt, metadata, chat_id)
+                    _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
         except Exception as exc:  # noqa: BLE001
             import logging
             import traceback
@@ -981,3 +1159,38 @@ def handle_telegram_callback(
                 "Callback dispatch failed: %s\n%s", exc, traceback.format_exc()
             )
             _respond(chat_id, f"Command failed: `{str(exc)}`", placeholder_id)
+
+    elif data.startswith("retry:"):
+        task_id = data[len("retry:"):]
+        cached = _task_cache.get(task_id)
+        if not cached:
+            send_telegram_message(chat_id, "Task not in cache — please re-send the command.")
+            return
+        placeholder_id = send_telegram_message(chat_id, "Retrying task...")
+        provider = cached["provider"]
+        prompt = cached["prompt"]
+        metadata = cached.get("metadata", {})
+        try:
+            result = orchestrator.submit_task(
+                db,
+                provider=provider,
+                prompt=prompt,
+                requested_by=f"telegram:{chat_id}",
+                idempotency_key=None,
+                metadata=metadata or None,
+            )
+            if result.error and AUTH_REQUIRED_MARKER in result.error:
+                _handle_cli_auth_required(chat_id, placeholder_id, orchestrator, provider, None)
+            elif result.approval_required:
+                _respond(chat_id, f"⏳ *Approval required*\nTask: `{result.task_id}`\nReason: {escape_md(result.error or '')}", placeholder_id)
+            else:
+                _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+                if result.task_id:
+                    _cache_task(result.task_id, provider, prompt, metadata, chat_id)
+                    _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
+        except Exception as exc:  # noqa: BLE001
+            _respond(chat_id, f"Retry failed: `{escape_md(str(exc))}`", placeholder_id)
+
+    elif data.startswith("export:"):
+        task_id = data[len("export:"):]
+        _export_task(db, chat_id, task_id, None)

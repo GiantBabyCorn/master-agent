@@ -116,6 +116,9 @@ def on_startup() -> None:
             {"command": "sync", "description": "Sync provider data: /sync <provider>"},
             {"command": "agent", "description": "Manage agents: /agent <create|list|start|stop>"},
             {"command": "config", "description": "CLI config: /config allowlist ..."},
+            {"command": "history", "description": "List recent tasks: /history [N]"},
+            {"command": "export", "description": "Export task as markdown: /export <task_id>"},
+            {"command": "audit", "description": "Show policy decisions: /audit [N]"},
         ])
 
     global agent_watcher  # noqa: PLW0603

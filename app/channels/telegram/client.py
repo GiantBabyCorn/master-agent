@@ -256,6 +256,51 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> bo
     return data.get("ok", False)
 
 
+def send_telegram_document(
+    chat_id: int,
+    filename: str,
+    content: str,
+    caption: str | None = None,
+    reply_to_message_id: int | None = None,
+) -> int | None:
+    """Send text content as a file attachment (Telegram document).
+
+    *content* is encoded as UTF-8 and sent as a file named *filename*.
+    Returns the sent message_id, or None on failure.
+    """
+    import io
+    import json as _json
+
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return None
+
+    file_obj = io.BytesIO(content.encode("utf-8"))
+    files = {"document": (filename, file_obj, "text/plain")}
+    form_data: dict = {"chat_id": str(chat_id)}
+    if caption:
+        form_data["caption"] = caption[:1024]  # Telegram caption limit
+    if reply_to_message_id is not None:
+        form_data["reply_parameters"] = _json.dumps({"message_id": reply_to_message_id})
+
+    try:
+        with httpx.Client(timeout=settings.request_timeout_sec) as client:
+            response = client.post(
+                telegram_api_url("sendDocument"),
+                data=form_data,
+                files=files,
+            )
+        _check_rate_limit(response)
+        if response.status_code < 400:
+            return response.json().get("result", {}).get("message_id")
+        description = _telegram_error_description(response)
+        logger.error("Telegram sendDocument failed (%s): %s", response.status_code, description)
+        return None
+    except Exception:  # noqa: BLE001
+        logger.warning("send_telegram_document failed for chat_id=%s", chat_id)
+        return None
+
+
 def delete_telegram_message(chat_id: int, message_id: int) -> bool:
     """Delete a message."""
     settings = get_settings()
