@@ -13,6 +13,20 @@ class TelegramChat(BaseModel):
     type: str
 
 
+class TelegramDocument(BaseModel):
+    file_id: str
+    file_name: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = None
+
+
+class TelegramPhotoSize(BaseModel):
+    file_id: str
+    width: int
+    height: int
+    file_size: int | None = None
+
+
 class TelegramMessage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -21,6 +35,9 @@ class TelegramMessage(BaseModel):
     chat: TelegramChat
     text: str | None = None
     date: int
+    document: TelegramDocument | None = None
+    photo: list[TelegramPhotoSize] | None = None
+    caption: str | None = None
 
 
 class TelegramCallbackQuery(BaseModel):

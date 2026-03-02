@@ -2,7 +2,7 @@ import logging
 import sys
 
 from fastapi import FastAPI
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from app.api.routes_control import router as control_router
 from app.api.routes_agents import router as agents_router
@@ -29,6 +29,22 @@ logger = logging.getLogger("master-agent")
 polling_runner: TelegramPollingRunner | None = None
 agent_watcher: CloudAgentWatcher | None = None
 task_scheduler: TaskScheduler | None = None
+
+
+def _migrate_enum_values() -> None:
+    """Add new enum values to existing PostgreSQL types.
+
+    ``create_all()`` creates types on first run but never alters them.
+    New enum members must be added explicitly with ``ALTER TYPE … ADD VALUE``.
+    ``IF NOT EXISTS`` makes each statement idempotent.
+    """
+    new_values: dict[str, list[str]] = {
+        "providerkind": ["CLAUDE_CLI", "ANTHROPIC_API"],
+    }
+    with engine.begin() as conn:
+        for type_name, values in new_values.items():
+            for value in values:
+                conn.execute(text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}'"))
 
 
 def _maybe_revoke_stale_webhook() -> None:
@@ -76,6 +92,8 @@ def on_startup() -> None:
     if settings.db_auto_create_tables:
         # Bootstrap mode for initial setup. Replace with Alembic migrations in production.
         Base.metadata.create_all(bind=engine)
+        # ALTER TYPE doesn't run via create_all() — add any new enum values here.
+        _migrate_enum_values()
 
     orchestrator = get_orchestrator()
     orchestrator.provider_registry.verify_all(logger=logger, force=True)

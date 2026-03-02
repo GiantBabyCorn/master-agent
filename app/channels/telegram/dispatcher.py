@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import io
 import logging
+import math
+import os
 import re
 import threading
 import time
+import uuid
+import zipfile
 from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger("master-agent.telegram.dispatcher")
 
@@ -14,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.channels.telegram.client import (
     answer_callback_query,
     delete_telegram_message,
+    download_telegram_file,
     edit_telegram_message,
     escape_md,
     get_bot_username,
@@ -94,10 +101,13 @@ def _list_projects_text(db: Session, orchestrator: MasterOrchestrator | None = N
 
     projects = list(db.scalars(select(Project).order_by(Project.created_at.desc()).limit(20)).all())
     if projects:
-        lines = [f"• `{p.name}` — {escape_md(p.status.value)}" for p in projects]
-        sections.append("*Local projects:*\n" + "\n".join(lines))
+        lines = []
+        for p in projects:
+            path_label = f"\n  `{escape_md(p.repo_path)}`" if p.repo_path else ""
+            lines.append(f"• *{escape_md(p.name)}* — {escape_md(p.status.value)}{path_label}")
+        sections.append("*Local projects* _(claude\\_cli, cursor\\_cli)_:\n" + "\n".join(lines))
     else:
-        sections.append("*Local projects:*\nNone.")
+        sections.append("*Local projects* _(claude\\_cli, cursor\\_cli)_:\nNone.")
 
     if orchestrator and orchestrator.provider_registry.is_available("cursor_cloud"):
         provider = orchestrator.provider_registry.get("cursor_cloud")
@@ -109,14 +119,14 @@ def _list_projects_text(db: Session, orchestrator: MasterOrchestrator | None = N
                 age_min = int((datetime.utcnow() - result.fetched_at).total_seconds() / 60)
                 age_label = f" _(cached {age_min} min ago)_" if result.from_cache else " _(just fetched)_"
             stale_label = " ⚠ stale" if result.stale else ""
-            sections.append(f"*GitHub repositories:*{age_label}{stale_label}\n" + "\n".join(repo_lines))
+            sections.append(f"*GitHub repositories* _(cursor\\_cloud)_:{age_label}{stale_label}\n" + "\n".join(repo_lines))
             if result.from_cache and result.fetched_at:
                 from app.providers.cursor_cloud import REPO_CACHE_TTL
                 remaining = REPO_CACHE_TTL - int((datetime.utcnow() - result.fetched_at).total_seconds())
                 if remaining > 0:
                     sections.append(f"_Next refresh in {remaining // 60} min._")
         elif result.error:
-            sections.append(f"*GitHub repositories:*\n_{escape_md(result.error)}_")
+            sections.append(f"*GitHub repositories* _(cursor\\_cloud)_:\n_{escape_md(result.error)}_")
 
     return "\n\n".join(sections)
 
@@ -330,6 +340,63 @@ def _respond(chat_id: int, text: str, placeholder_id: int | None) -> None:
     send_threaded_response(chat_id, text, edit_message_id=placeholder_id)
 
 
+# ---------------------------------------------------------------------------
+# Per-task workspace helpers
+# ---------------------------------------------------------------------------
+_WORKSPACE_BASE = "/workspaces"
+
+
+def _make_workspace() -> str:
+    """Create an isolated directory for a single task and return its path."""
+    path = os.path.join(_WORKSPACE_BASE, uuid.uuid4().hex)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+_ZIP_PART_BYTES = 45 * 1024 * 1024  # 45 MB — Telegram bot limit is 50 MB
+
+
+def _send_workspace_output(chat_id: int, workspace: str, reply_to_id: int | None) -> None:
+    """If the agent created an output/ subfolder, zip its contents and send back.
+
+    Files are packed into a single zip.  If the total exceeds 45 MB, the zip
+    is split into output.part01.zip, output.part02.zip, … using a greedy
+    bin-packing approach so each part stays under the Telegram limit.
+    """
+    output_dir = Path(workspace) / "output"
+    if not output_dir.exists():
+        return
+    files = sorted(f for f in output_dir.rglob("*") if f.is_file())
+    if not files:
+        return
+
+    file_data = [(f.relative_to(output_dir), f.read_bytes()) for f in files]
+    total_bytes = sum(len(b) for _, b in file_data)
+
+    if total_bytes <= _ZIP_PART_BYTES:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for rel, data in file_data:
+                zf.writestr(str(rel), data)
+        send_telegram_document(chat_id, "output.zip", buf.getvalue(), reply_to_message_id=reply_to_id)
+    else:
+        n_parts = math.ceil(total_bytes / _ZIP_PART_BYTES)
+        part_files: list[list] = [[] for _ in range(n_parts)]
+        part_sizes = [0] * n_parts
+        for rel, data in file_data:
+            smallest = min(range(n_parts), key=lambda i: part_sizes[i])
+            part_files[smallest].append((rel, data))
+            part_sizes[smallest] += len(data)
+        for i, part in enumerate(part_files, 1):
+            if not part:
+                continue
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for rel, data in part:
+                    zf.writestr(str(rel), data)
+            send_telegram_document(chat_id, f"output.part{i:02d}.zip", buf.getvalue(), reply_to_message_id=reply_to_id)
+
+
 def _extract_command_and_body(text: str) -> tuple[str, str]:
     """Split '/command arg1 arg2\\nrest of body' into (command, 'arg1 arg2\\nrest of body').
 
@@ -396,10 +463,22 @@ def _handle_cli_auth_required(
     _respond(chat_id, "Login required. Starting authentication...", placeholder_id)
 
     try:
+        from app.providers._login_helper import _dbg as _oauth_dbg
+        _oauth_dbg(f"_handle_cli_auth_required: starting login for provider={provider_name} chat_id={chat_id}")
+    except Exception:
+        pass
+
+    try:
         url, session = provider.start_login()
     except Exception as exc:  # noqa: BLE001
         _respond(chat_id, f"Failed to start login: `{escape_md(str(exc))}`", placeholder_id)
         return
+
+    try:
+        from app.providers._login_helper import _dbg as _oauth_dbg
+        _oauth_dbg(f"_handle_cli_auth_required: start_login returned url={'yes' if url else 'NONE'}, session={type(session).__name__}")
+    except Exception:
+        pass
 
     # Determine login timeout from settings
     login_timeout = getattr(settings, f"{provider_name}_login_timeout_sec", None) or settings.cursor_cli_login_timeout_sec
@@ -448,14 +527,34 @@ def _handle_cli_auth_required(
         }
 
     def _wait_and_retry() -> None:
+        import re as _re
+        try:
+            from app.providers._login_helper import _dbg as _oauth_dbg
+            _oauth_dbg(f"_wait_and_retry: calling wait_login provider={provider_name} timeout={login_timeout}s")
+        except Exception:
+            pass
         success = provider.wait_login(session, timeout_sec=login_timeout)
         _pending_logins.pop(chat_id, None)  # clean up whether success or not
+        try:
+            from app.providers._login_helper import _dbg as _oauth_dbg
+            _oauth_dbg(f"_wait_and_retry: wait_login returned success={success}")
+        except Exception:
+            pass
         if not success:
+            # Include the last few lines of CLI output so the user can see why.
+            diag = ""
+            if hasattr(session, "output_so_far"):
+                raw = session.output_so_far()
+                clean = _re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", raw)
+                lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
+                if lines:
+                    snippet = "\n".join(lines[-6:])
+                    diag = f"\n\n_CLI output:_\n`{escape_md(snippet)}`"
             edit_telegram_message(
                 chat_id,
                 placeholder_id,
-                f"Login for *{escape_md(provider_name)}* did not complete in time.\n"
-                "Please log in from the server terminal, then retry your command.",
+                f"Login for *{escape_md(provider_name)}* failed\\."
+                f"\nTry `/login {escape_md(provider_name)}` to try again\\.{diag}",
             )
             return
         if rerun_fn is None:
@@ -765,6 +864,9 @@ def dispatch_telegram_command(
             if ref:
                 metadata["ref"] = ref
 
+        workspace = _make_workspace()
+        meta_with_ws = {**(metadata or {}), "workspace": workspace}
+
         def _run_task():
             r = orchestrator.submit_task(
                 db,
@@ -772,12 +874,14 @@ def dispatch_telegram_command(
                 prompt=prompt,
                 requested_by=f"telegram:{chat_id}",
                 idempotency_key=None,
-                metadata=metadata or None,
+                project_path=workspace,
+                metadata=meta_with_ws,
             )
             if r.approval_required:
                 _respond(chat_id, f"⏳ *Approval required*\nTask: `{r.task_id}`\nReason: {escape_md(r.error or '')}", placeholder_message_id)
             else:
                 _respond(chat_id, escape_md(r.output or r.error or "No output"), placeholder_message_id)
+                _send_workspace_output(chat_id, workspace, placeholder_message_id)
 
         result = orchestrator.submit_task(
             db,
@@ -785,7 +889,8 @@ def dispatch_telegram_command(
             prompt=prompt,
             requested_by=f"telegram:{chat_id}",
             idempotency_key=idempotency_key,
-            metadata=metadata or None,
+            project_path=workspace,
+            metadata=meta_with_ws,
         )
         if result.error and AUTH_REQUIRED_MARKER in result.error:
             _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, provider, _run_task)
@@ -800,6 +905,7 @@ def dispatch_telegram_command(
         if provider == "cursor_cloud" and result.external_run_id:
             _register_cloud_agent(db, result, chat_id)
         _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_message_id)
+        _send_workspace_output(chat_id, workspace, placeholder_message_id)
         if result.task_id:
             _cache_task(result.task_id, provider, prompt, metadata, chat_id)
             _send_task_action_buttons(chat_id, result.task_id, placeholder_message_id)
@@ -1037,11 +1143,11 @@ def _command_bot_target(text: str) -> str | None:
 
 def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: MasterOrchestrator) -> None:
     message = update.message
-    if not message or not message.text:
+    if not message or (not message.text and not message.document and not message.photo):
         return
 
     is_group = message.chat.type in ("group", "supergroup", "channel")
-    bot_target = _command_bot_target(message.text)
+    bot_target = _command_bot_target(message.text or "")
 
     if is_group:
         # In groups, ONLY respond to commands that explicitly name our bot
@@ -1070,7 +1176,19 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
         text = (message.text or "").strip()
         if text and not text.startswith("/"):
             _record_channel_session(db, chat_id, user_id)
-            pending["session"].send_code(text)
+            try:
+                from app.providers._login_helper import _dbg
+                code_bare = text.split("#")[0].strip()
+                _dbg(f"dispatcher: code received from Telegram chat_id={chat_id}, raw={text!r}")
+                _dbg(f"dispatcher: bare code (#{'' if '#' not in text else 'state stripped'})={code_bare!r}")
+                _dbg(f"dispatcher: session type={type(pending['session']).__name__}")
+            except Exception:
+                pass
+            # Strip #{state} suffix if present — callback pages format the code
+            # as "{code}#{state}" but the CLI (and PKCE exchange) only want the
+            # bare code before the '#'.
+            code_to_send = text.split("#")[0].strip()
+            pending["session"].send_code(code_to_send)
             _pending_logins.pop(chat_id, None)
             # Edit the original auth placeholder so the user sees progress in-place.
             edit_telegram_message(
@@ -1081,6 +1199,43 @@ def handle_telegram_update(db: Session, update: TelegramUpdate, orchestrator: Ma
             return
     elif pending:
         _pending_logins.pop(chat_id, None)  # expired
+
+    # --- Incoming file/photo messages ---
+    if (message.document or message.photo) and not (message.text or "").strip():
+        caption = (message.caption or "").strip()
+        if not caption.lower().startswith("/run "):
+            send_telegram_message(
+                chat_id,
+                "To process a file, send it with a caption like:\n"
+                "`/run claude_cli analyze this code`",
+            )
+            return
+        # Parse "/run <provider> <rest-of-prompt>" from caption
+        _, rest = caption.split(None, 1)  # drop "/run"
+        tokens = rest.split(None, 1)
+        provider = tokens[0]
+        user_prompt = tokens[1] if len(tokens) > 1 else "Process the attached file."
+        file_id = message.document.file_id if message.document else message.photo[-1].file_id
+        dl = download_telegram_file(file_id)
+        if not dl:
+            send_telegram_message(chat_id, "Failed to download the file. Please try again.")
+            return
+        fname, fbytes = dl
+        workspace = _make_workspace()
+        (Path(workspace) / fname).write_bytes(fbytes)
+        full_prompt = f"[File saved to workspace: {fname}]\n{user_prompt}"
+        placeholder_id = send_telegram_message(chat_id, "File received, processing\u2026")
+        result = orchestrator.submit_task(
+            db,
+            provider=provider,
+            prompt=full_prompt,
+            requested_by=f"telegram:{chat_id}",
+            project_path=workspace,
+            metadata={"workspace": workspace},
+        )
+        _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+        _send_workspace_output(chat_id, workspace, placeholder_id)
+        return
 
     _record_channel_session(db, chat_id, user_id)
 
@@ -1181,6 +1336,8 @@ def handle_telegram_callback(
         if ref:
             metadata["ref"] = ref
 
+        workspace = _make_workspace()
+        metadata["workspace"] = workspace
         try:
             result = orchestrator.submit_task(
                 db,
@@ -1188,6 +1345,7 @@ def handle_telegram_callback(
                 prompt=prompt,
                 requested_by=f"telegram:{chat_id}",
                 idempotency_key=pending.get("idempotency_key"),
+                project_path=workspace,
                 metadata=metadata,
             )
             if result.approval_required:
@@ -1200,6 +1358,7 @@ def handle_telegram_callback(
                 if provider == "cursor_cloud" and result.external_run_id:
                     _register_cloud_agent(db, result, chat_id)
                 _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+                _send_workspace_output(chat_id, workspace, placeholder_id)
                 if result.task_id:
                     _cache_task(result.task_id, provider, prompt, metadata, chat_id)
                     _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
@@ -1221,6 +1380,7 @@ def handle_telegram_callback(
         provider = cached["provider"]
         prompt = cached["prompt"]
         metadata = cached.get("metadata", {})
+        workspace = _make_workspace()
         try:
             result = orchestrator.submit_task(
                 db,
@@ -1228,7 +1388,8 @@ def handle_telegram_callback(
                 prompt=prompt,
                 requested_by=f"telegram:{chat_id}",
                 idempotency_key=None,
-                metadata=metadata or None,
+                project_path=workspace,
+                metadata={**metadata, "workspace": workspace} if metadata else {"workspace": workspace},
             )
             if result.error and AUTH_REQUIRED_MARKER in result.error:
                 _handle_cli_auth_required(chat_id, placeholder_id, orchestrator, provider, None)
@@ -1240,6 +1401,7 @@ def handle_telegram_callback(
                 )
             else:
                 _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+                _send_workspace_output(chat_id, workspace, placeholder_id)
                 if result.task_id:
                     _cache_task(result.task_id, provider, prompt, metadata, chat_id)
                     _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
@@ -1261,7 +1423,8 @@ def handle_telegram_callback(
         placeholder_id = send_telegram_message(chat_id, "Approved — running task...")
         provider = pending["provider"]
         prompt = pending["prompt"]
-        metadata = {**(pending.get("metadata") or {}), "force": True}
+        workspace = _make_workspace()
+        metadata = {**(pending.get("metadata") or {}), "force": True, "workspace": workspace}
         try:
             result = orchestrator.submit_task(
                 db,
@@ -1269,9 +1432,11 @@ def handle_telegram_callback(
                 prompt=prompt,
                 requested_by=pending.get("requested_by") or f"telegram:{chat_id}",
                 idempotency_key=None,
+                project_path=workspace,
                 metadata=metadata,
             )
             _respond(chat_id, escape_md(result.output or result.error or "No output"), placeholder_id)
+            _send_workspace_output(chat_id, workspace, placeholder_id)
             if result.task_id:
                 _cache_task(result.task_id, provider, prompt, metadata, chat_id)
                 _send_task_action_buttons(chat_id, result.task_id, placeholder_id)

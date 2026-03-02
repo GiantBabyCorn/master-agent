@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os as _os_mod
+import datetime as _dt_mod
 import re
 import subprocess
 import sys
@@ -10,6 +12,23 @@ import time
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 # Matches OSC8 hyperlinks: ESC ] 8 ; ; URL ST  (ST = ESC \)
 _OSC8_RE = re.compile(r"\x1b]8;;([^\x1b]*)\x1b\\")
+
+# ---------------------------------------------------------------------------
+# Debug file logger — set _OAUTH_DEBUG=True to re-enable
+# ---------------------------------------------------------------------------
+_OAUTH_LOG = "/tmp/claude_oauth.log"
+_OAUTH_DEBUG = False
+
+
+def _dbg(msg: str) -> None:
+    if not _OAUTH_DEBUG:
+        return
+    ts = _dt_mod.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    try:
+        with open(_OAUTH_LOG, "a", encoding="utf-8") as _f:
+            _f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 class LoginSession:
@@ -42,18 +61,24 @@ class LoginSession:
         CLIs in canonical mode, so ``\\r`` is safe for both modes.
         """
         encoded = (code.strip() + "\r").encode()
+        _dbg(f"send_code: writing {len(encoded)} bytes to PTY: {encoded!r}")
+        _dbg(f"send_code: master_fd={self._master_fd}, proc.pid={getattr(self.proc, 'pid', None)}, proc.returncode={getattr(self.proc, 'returncode', '?')}")
         if self._master_fd is not None:
             import os as _os
             try:
                 _os.write(self._master_fd, encoded)
-            except OSError:
-                pass
+                _dbg("send_code: write to master_fd succeeded")
+            except OSError as e:
+                _dbg(f"send_code: write to master_fd FAILED: {e}")
         elif self.proc.stdin:
             try:
                 self.proc.stdin.write(encoded.decode())
                 self.proc.stdin.flush()
-            except OSError:
-                pass
+                _dbg("send_code: write to proc.stdin succeeded")
+            except OSError as e:
+                _dbg(f"send_code: write to proc.stdin FAILED: {e}")
+        else:
+            _dbg("send_code: NO write target (master_fd is None and proc.stdin is None)")
 
     def wait(self, timeout_sec: int = 300) -> bool:
         """Wait for the login process to finish.  Returns True on exit code 0."""
@@ -235,6 +260,27 @@ def read_url_from_pty(
     except OSError:
         pass
 
+    def _setup_ctty() -> None:
+        """Run in the child after setsid(): set the slave PTY (fd 0) as the
+        controlling terminal so /dev/tty refers to it.
+
+        Without this, CLIs that read secure input via /dev/tty (e.g.
+        ``claude setup-token``) fail to open /dev/tty and exit immediately,
+        because the subprocess has no controlling terminal.
+
+        ``start_new_session=True`` calls setsid() first (making the child a
+        session leader with no controlling terminal), then preexec_fn runs
+        TIOCSCTTY to attach the slave PTY as the controlling terminal.
+        """
+        try:
+            import fcntl as _fcntl2
+            import termios as _termios2
+            _fcntl2.ioctl(0, _termios2.TIOCSCTTY, 0)
+            _dbg("_setup_ctty: TIOCSCTTY succeeded")
+        except OSError as e:
+            _dbg(f"_setup_ctty: TIOCSCTTY failed (non-fatal): {e}")
+
+    _dbg(f"read_url_from_pty: spawning {cmd_args}")
     try:
         proc = subprocess.Popen(
             cmd_args,
@@ -242,12 +288,16 @@ def read_url_from_pty(
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=True,
+            start_new_session=True,   # calls setsid() → child becomes session leader
+            preexec_fn=_setup_ctty,   # then TIOCSCTTY → slave becomes controlling terminal
         )
-    except Exception:
+    except Exception as e:
+        _dbg(f"read_url_from_pty: Popen FAILED: {e}")
         _os.close(slave_fd)
         _os.close(master_fd)
         raise
 
+    _dbg(f"read_url_from_pty: process started pid={proc.pid}")
     _os.close(slave_fd)  # Parent process doesn't need the slave end
 
     # Create the session first so the reader thread can write directly into
@@ -256,18 +306,25 @@ def read_url_from_pty(
     chunks = session._output_chunks  # same list object — reader populates it
 
     def _pty_reader() -> None:
+        total_bytes = 0
         try:
             while True:
                 try:
                     data = _os.read(master_fd, 4096)
                     if not data:
+                        _dbg(f"_pty_reader: EOF (total {total_bytes} bytes read)")
                         break
+                    total_bytes += len(data)
                     chunks.append(data)
-                except OSError:
+                    # Log printable content (strip ANSI for readability)
+                    clean = _ANSI_ESCAPE_RE.sub("", data.decode("utf-8", errors="replace"))
+                    _dbg(f"_pty_reader: +{len(data)}B => {clean!r}")
+                except OSError as e:
                     # EIO is normal when the slave is closed (process exited)
+                    _dbg(f"_pty_reader: OSError (process likely exited): {e}. Total {total_bytes} bytes.")
                     break
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            _dbg(f"_pty_reader: unexpected exception: {e}")
 
     t = threading.Thread(target=_pty_reader, daemon=True)
     t.start()
@@ -289,6 +346,7 @@ def read_url_from_pty(
 
             if trigger.lower() in new_text.lower():
                 # Trigger found — send the response keystroke.
+                _dbg(f"read_url_from_pty: interaction trigger found {trigger!r}, sending {response!r}")
                 try:
                     _os.write(master_fd, response.encode())
                 except OSError:
@@ -298,6 +356,7 @@ def read_url_from_pty(
                 step_started = time.monotonic()
             elif time.monotonic() - step_started > interaction_timeout_sec:
                 # Trigger never appeared — skip this step (menu may not exist).
+                _dbg(f"read_url_from_pty: interaction trigger {trigger!r} timed out, skipping")
                 remaining.pop(0)
                 step_started = time.monotonic()
                 # Don't advance search_offset: the next trigger might already
@@ -307,14 +366,18 @@ def read_url_from_pty(
 
         url = _extract_url(combined, url_pattern)
         if url:
+            _dbg(f"read_url_from_pty: URL found: {url}")
             return url, session
         if proc.poll() is not None:
+            _dbg(f"read_url_from_pty: process exited (rc={proc.returncode}) before URL found")
             t.join(timeout=0.5)
             break
         time.sleep(0.1)
 
     combined = b"".join(chunks).decode("utf-8", errors="replace")
-    return _extract_url(combined, url_pattern), session
+    url = _extract_url(combined, url_pattern)
+    _dbg(f"read_url_from_pty: deadline reached. URL={'found' if url else 'NOT found'}. Total output len={len(combined)}")
+    return url, session
 
 
 def _read_url_pipe_fallback(

@@ -259,13 +259,14 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> bo
 def send_telegram_document(
     chat_id: int,
     filename: str,
-    content: str,
+    content: str | bytes,
     caption: str | None = None,
     reply_to_message_id: int | None = None,
 ) -> int | None:
-    """Send text content as a file attachment (Telegram document).
+    """Send a file attachment (Telegram document).
 
-    *content* is encoded as UTF-8 and sent as a file named *filename*.
+    *content* may be a ``str`` (encoded as UTF-8, sent as text/plain) or raw
+    ``bytes`` (sent as application/octet-stream).
     Returns the sent message_id, or None on failure.
     """
     import io
@@ -275,8 +276,13 @@ def send_telegram_document(
     if not settings.telegram_bot_token:
         return None
 
-    file_obj = io.BytesIO(content.encode("utf-8"))
-    files = {"document": (filename, file_obj, "text/plain")}
+    if isinstance(content, str):
+        file_obj = io.BytesIO(content.encode("utf-8"))
+        mime_type = "text/plain"
+    else:
+        file_obj = io.BytesIO(content)
+        mime_type = "application/octet-stream"
+    files = {"document": (filename, file_obj, mime_type)}
     form_data: dict = {"chat_id": str(chat_id)}
     if caption:
         form_data["caption"] = caption[:1024]  # Telegram caption limit
@@ -298,6 +304,38 @@ def send_telegram_document(
         return None
     except Exception:  # noqa: BLE001
         logger.warning("send_telegram_document failed for chat_id=%s", chat_id)
+        return None
+
+
+def download_telegram_file(file_id: str) -> tuple[str, bytes] | None:
+    """Download a file from Telegram by file_id.
+
+    Returns ``(filename, content_bytes)`` on success, or ``None`` on failure.
+    Uses two API calls: ``getFile`` to resolve the path, then a direct CDN
+    download.
+    """
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return None
+    try:
+        with httpx.Client(timeout=60) as client:
+            r = client.get(telegram_api_url("getFile"), params={"file_id": file_id})
+        if r.status_code >= 400:
+            logger.warning("Telegram getFile failed (%s)", r.status_code)
+            return None
+        file_path = r.json().get("result", {}).get("file_path", "")
+        if not file_path:
+            return None
+        cdn_url = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file_path}"
+        with httpx.Client(timeout=120) as client:
+            r2 = client.get(cdn_url)
+        if r2.status_code >= 400:
+            logger.warning("Telegram file CDN download failed (%s)", r2.status_code)
+            return None
+        filename = file_path.split("/")[-1]
+        return filename, r2.content
+    except Exception:  # noqa: BLE001
+        logger.warning("download_telegram_file failed for file_id=%s", file_id)
         return None
 
 

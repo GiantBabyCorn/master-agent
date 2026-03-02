@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     claude_cli_command: str = ""  # if empty, falls back to anthropic_cli_command
     claude_cli_login_timeout_sec: int = 300
     claude_cli_url_capture_timeout_sec: int = 30
+    # Claude CLI OAuth overrides (mirrors what the claude binary itself supports)
+    claude_code_oauth_client_id: str = ""  # overrides default client ID; empty = use built-in
+    claude_auth_use_platform: bool = False  # true = use platform.claude.com/oauth/authorize instead of claude.ai
+    # Login method: "auth_login" (PTY `claude auth login`) or "pkce_platform" (API PKCE via platform.claude.com)
+    claude_login_method: str = "auth_login"
 
     codex_cli_command: str = "codex"
     codex_enable_api: bool = False
@@ -63,6 +68,7 @@ class Settings(BaseSettings):
     approval_medium_requires_user: bool = True
 
     request_timeout_sec: int = 30
+    claude_cli_task_timeout_sec: int = 600  # claude -p can run for minutes; separate from API timeout
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 300
     circuit_breaker_fail_threshold: int = 5

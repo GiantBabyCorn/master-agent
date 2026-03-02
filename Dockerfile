@@ -3,10 +3,6 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /app
-
-ENV PATH="/root/.local/bin:${PATH}"
-
 ARG INSTALL_NODEJS=false
 ARG CURSOR_CLI_INSTALL_CMD=""
 ARG ANTHROPIC_CLI_INSTALL_CMD=""
@@ -18,8 +14,20 @@ RUN if [ "${INSTALL_NODEJS}" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/* ; \
     fi
 
-COPY pyproject.toml README.md ./
-COPY app ./app
+# Create a non-root user. The Claude CLI refuses --dangerously-skip-permissions
+# when running as root, and OAuth credentials are stored in $HOME/.claude/.
+RUN useradd -m -u 1000 -s /bin/bash claude
+
+WORKDIR /app
+RUN chown claude:claude /app
+
+COPY --chown=claude:claude pyproject.toml README.md ./
+COPY --chown=claude:claude app ./app
+
+USER claude
+ENV PATH="/home/claude/.local/bin:${PATH}"
+# Redirect global npm installs to a user-writable location (avoids EACCES on /usr/local)
+ENV NPM_CONFIG_PREFIX=/home/claude/.local
 
 RUN pip install --no-cache-dir -e .
 
