@@ -23,6 +23,14 @@ class LoginSession:
     def __init__(self, proc: subprocess.Popen, master_fd: int | None = None) -> None:
         self.proc = proc
         self._master_fd = master_fd
+        # Raw PTY bytes written here by read_url_from_pty()'s background reader.
+        # Providers can inspect this via output_so_far() to detect auth success
+        # directly from the REPL's output without needing a separate status command.
+        self._output_chunks: list[bytes] = []
+
+    def output_so_far(self) -> str:
+        """Return all PTY output accumulated so far, decoded as UTF-8."""
+        return b"".join(self._output_chunks).decode("utf-8", errors="replace")
 
     def send_code(self, code: str) -> None:
         """Write *code* to the subprocess stdin so the CLI can complete auth.
@@ -64,6 +72,52 @@ class LoginSession:
             self.proc.kill()
         except OSError:
             pass
+
+
+class PkceLoginSession:
+    """Login session backed by a direct OAuth 2.0 PKCE token exchange.
+
+    Unlike ``LoginSession`` this class does not spawn a subprocess.  The
+    provider builds the authorization URL from the PKCE parameters, returns it
+    to the dispatcher (which sends it to the user), and waits for the user to
+    paste the authorization code back.  ``send_code()`` then POSTs to the
+    token endpoint and writes the credentials file so the Claude CLI can pick
+    them up immediately.
+    """
+
+    # No subprocess — wait_login() must handle proc=None.
+    proc: None = None
+    _master_fd: None = None
+
+    def __init__(
+        self,
+        code_verifier: str,
+        state: str,
+        exchange_fn,  # callable(code, code_verifier, state) -> None
+    ) -> None:
+        self._code_verifier = code_verifier
+        self._state = state
+        self._exchange_fn = exchange_fn
+        self._success = False
+        self._error: str | None = None
+        self._output_chunks: list[bytes] = []  # unused; kept for duck-typing
+
+    def send_code(self, code: str) -> None:
+        """Exchange the auth code for tokens and write ~/.claude/.credentials.json."""
+        try:
+            self._exchange_fn(code.strip(), self._code_verifier, self._state)
+            self._success = True
+        except Exception as exc:  # noqa: BLE001
+            self._error = str(exc)
+
+    def kill(self) -> None:
+        pass  # nothing to kill
+
+    def output_so_far(self) -> str:
+        return ""
+
+    def wait(self, timeout_sec: int = 300) -> bool:  # noqa: ARG002
+        return self._success
 
 
 def _extract_url(text: str, pattern: re.Pattern) -> str | None:
@@ -196,8 +250,10 @@ def read_url_from_pty(
 
     _os.close(slave_fd)  # Parent process doesn't need the slave end
 
+    # Create the session first so the reader thread can write directly into
+    # session._output_chunks, making live PTY output accessible to wait_login().
     session = LoginSession(proc, master_fd=master_fd)
-    chunks: list[bytes] = []
+    chunks = session._output_chunks  # same list object — reader populates it
 
     def _pty_reader() -> None:
         try:
