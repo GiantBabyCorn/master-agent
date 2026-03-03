@@ -343,7 +343,7 @@ def _respond(chat_id: int, text: str, placeholder_id: int | None) -> None:
 # ---------------------------------------------------------------------------
 # Per-task workspace helpers
 # ---------------------------------------------------------------------------
-_WORKSPACE_BASE = "/workspaces"
+_WORKSPACE_BASE = "/tmp/workspaces"
 
 
 def _make_workspace() -> str:
