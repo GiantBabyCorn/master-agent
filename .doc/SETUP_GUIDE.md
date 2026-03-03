@@ -78,6 +78,19 @@ Use `.env.example` comments as the source of truth for key format and how to obt
    - DB interactions must go through application APIs.
    - For emergency debugging only, temporarily expose DB port in local compose override and remove it immediately after use.
 
+### Development workflow — rebuild vs restart vs nothing
+
+The API container bind-mounts the repo (`./:/app`) and runs uvicorn with `--reload`, so most changes are picked up automatically:
+
+| Change | Action needed |
+|---|---|
+| Python source file (`.py`) | **Nothing** — uvicorn reloads automatically |
+| `.env` file | `docker compose restart master_agent_api` |
+| `requirements.txt` / `pyproject.toml` (new package) | `docker compose up --build` |
+| `Dockerfile` changed | `docker compose up --build` |
+| Build args (`DOCKER_INSTALL_NODEJS`, CLI install commands) | `docker compose up --build` |
+| DB schema change (new migration) | `docker compose restart master_agent_api` (auto-migration runs on startup) |
+
 ### Data safety notes
 
 - Postgres data is stored in named volume `postgres_data`.

@@ -792,11 +792,17 @@ def dispatch_telegram_command(
         providers = orchestrator.provider_registry.list_capabilities()
         lines = []
         for item in providers:
-            icon = "✅" if item["enabled"] else "❌"
+            reason_text = item.get("reason") or ""
+            if item["enabled"]:
+                icon = "✅"
+            elif "not authenticated" in reason_text.lower():
+                icon = "⚠️"
+            else:
+                icon = "❌"
             name = item["provider"]
-            status_label = escape_md(item["status"])
-            reason = f" - {escape_md(item['reason'])}" if item.get("reason") else ""
-            lines.append(f"{icon} {escape_md(name)}: {status_label}{reason}")
+            status_label = "auth needed" if icon == "⚠️" else escape_md(item["status"])
+            reason = f" - {escape_md(reason_text)}" if reason_text and icon == "❌" else ""
+            lines.append(f"{icon} `{name}` : {status_label}{reason}")
         _respond(chat_id, "Providers:\n" + "\n".join(lines), placeholder_message_id)
         return
 
