@@ -479,13 +479,13 @@ def _handle_cli_auth_required(
     try:
         provider = orchestrator.provider_registry.get(provider_name)
     except KeyError:
-        _respond(chat_id, f"Unknown provider `{escape_md(provider_name)}`", placeholder_id)
+        _respond(chat_id, f"Unknown provider `{provider_name}`", placeholder_id)
         return
 
     if not hasattr(provider, "start_login"):
         _respond(
             chat_id,
-            f"Provider `{escape_md(provider_name)}` does not support interactive login.\n"
+            f"Provider `{provider_name}` does not support interactive login.\n"
             "Please authenticate manually on the server.",
             placeholder_id,
         )
@@ -502,7 +502,7 @@ def _handle_cli_auth_required(
     try:
         url, session = provider.start_login()
     except Exception as exc:  # noqa: BLE001
-        _respond(chat_id, f"Failed to start login: `{escape_md(str(exc))}`", placeholder_id)
+        _respond(chat_id, f"Failed to start login: `{str(exc).replace('`', chr(39))}`", placeholder_id)
         return
 
     try:
@@ -580,18 +580,18 @@ def _handle_cli_auth_required(
                 lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
                 if lines:
                     snippet = "\n".join(lines[-6:])
-                    diag = f"\n\n_CLI output:_\n`{escape_md(snippet)}`"
+                    diag = f"\n\n_CLI output:_\n`{snippet.replace('`', chr(39))}`"
             edit_telegram_message(
                 chat_id,
                 placeholder_id,
-                f"Login for *{escape_md(provider_name)}* failed\\."
-                f"\nTry `/login {escape_md(provider_name)}` to try again\\.{diag}",
+                f"Login for *{escape_md(provider_name)}* failed."
+                f"\nTry `/login {provider_name}` to try again.{diag}",
             )
             return
         # Bust the registry cache so /providers reflects the new auth state
         orchestrator.provider_registry.verify_all(force=True)
         if rerun_fn is None:
-            edit_telegram_message(chat_id, placeholder_id, f"Login to *{escape_md(provider_name)}* successful\!")
+            edit_telegram_message(chat_id, placeholder_id, f"Login to *{escape_md(provider_name)}* successful!")
         else:
             edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
             rerun_fn()
@@ -752,7 +752,7 @@ def _export_task(db: Session, chat_id: int, task_id_or_prefix: str, placeholder_
             select(AgentTask).where(AgentTask.id.like(f"{task_id_or_prefix}%")).limit(2)
         ).all())
         if not rows:
-            _respond(chat_id, f"Task not found: `{escape_md(task_id_or_prefix)}`", placeholder_id)
+            _respond(chat_id, f"Task not found: `{task_id_or_prefix}`", placeholder_id)
             return
         if len(rows) > 1:
             ids = ", ".join(f"`{r.id[:8]}`" for r in rows)
@@ -843,7 +843,7 @@ def dispatch_telegram_command(
                 else:
                     icon = "❌"
                     status_label = escape_md(item["status"])
-                    reason = f" \\- {escape_md(reason_text)}" if reason_text else ""
+                    reason = f" - {escape_md(reason_text)}" if reason_text else ""
                 lines.append(f"{icon} `{name}` : {status_label}{reason}")
             return "Providers:\n" + "\n".join(lines)
 
@@ -1485,7 +1485,7 @@ def handle_telegram_callback(
                     _cache_task(result.task_id, provider, prompt, metadata, chat_id)
                     _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
         except Exception as exc:  # noqa: BLE001
-            _respond(chat_id, f"Retry failed: `{escape_md(str(exc))}`", placeholder_id)
+            _respond(chat_id, f"Retry failed: `{str(exc).replace('`', chr(39))}`", placeholder_id)
 
     elif data.startswith("export:"):
         task_id = data[len("export:"):]
@@ -1520,7 +1520,7 @@ def handle_telegram_callback(
                 _cache_task(result.task_id, provider, prompt, metadata, chat_id)
                 _send_task_action_buttons(chat_id, result.task_id, placeholder_id)
         except Exception as exc:  # noqa: BLE001
-            _respond(chat_id, f"Task failed after approval: `{escape_md(str(exc))}`", placeholder_id)
+            _respond(chat_id, f"Task failed after approval: `{str(exc).replace('`', chr(39))}`", placeholder_id)
 
     elif data.startswith("reject:"):
         task_id = data[len("reject:"):]

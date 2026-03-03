@@ -32,6 +32,8 @@ from app.utils.ids import new_id
 PROVIDER_KIND_BY_NAME: dict[str, ProviderKind] = {
     "cursor_cloud": ProviderKind.CURSOR_CLOUD,
     "cursor_cli": ProviderKind.CURSOR_CLI,
+    "claude_cli": ProviderKind.CLAUDE_CLI,
+    "anthropic_api": ProviderKind.ANTHROPIC_API,
     "anthropic": ProviderKind.ANTHROPIC,
     "codex": ProviderKind.CODEX,
 }
