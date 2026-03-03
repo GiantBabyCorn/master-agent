@@ -147,6 +147,35 @@ def _record_channel_session(db: Session, chat_id: int, user_id: int | None) -> N
     db.commit()
 
 
+_BUILD_HASH: str | None = None
+
+
+def _get_build_hash() -> str:
+    global _BUILD_HASH
+    if _BUILD_HASH is None:
+        try:
+            import subprocess as _sp
+            _BUILD_HASH = _sp.check_output(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                stderr=_sp.DEVNULL,
+                text=True,
+                cwd="/app",
+            ).strip() or "unknown"
+        except Exception:
+            # git binary not available — read .git/HEAD directly
+            try:
+                from pathlib import Path as _Path
+                head = (_Path("/app") / ".git" / "HEAD").read_text().strip()
+                if head.startswith("ref: "):
+                    ref_file = _Path("/app") / ".git" / head[5:]
+                    _BUILD_HASH = ref_file.read_text().strip()[:12]
+                else:
+                    _BUILD_HASH = head[:12]
+            except Exception:
+                _BUILD_HASH = "unknown"
+    return _BUILD_HASH
+
+
 def _help_text() -> str:
     return "\n".join(
         [
@@ -200,6 +229,8 @@ def _help_text() -> str:
             "`/history [N]` — List recent tasks (default 10)",
             "`/export <task_id>` — Export task as a markdown document",
             "`/audit [N]` — Show recent policy decisions (default 10)",
+            "",
+            f"build version: `v.{_get_build_hash()}`",
         ]
     )
 
@@ -557,6 +588,8 @@ def _handle_cli_auth_required(
                 f"\nTry `/login {escape_md(provider_name)}` to try again\\.{diag}",
             )
             return
+        # Bust the registry cache so /providers reflects the new auth state
+        orchestrator.provider_registry.verify_all(force=True)
         if rerun_fn is None:
             edit_telegram_message(chat_id, placeholder_id, f"Login to *{escape_md(provider_name)}* successful\!")
         else:
@@ -789,21 +822,61 @@ def dispatch_telegram_command(
         return
 
     if command == "/providers":
-        providers = orchestrator.provider_registry.list_capabilities()
-        lines = []
-        for item in providers:
-            reason_text = item.get("reason") or ""
-            if item["enabled"]:
-                icon = "✅"
-            elif "not authenticated" in reason_text.lower():
-                icon = "⚠️"
-            else:
-                icon = "❌"
-            name = item["provider"]
-            status_label = "auth needed" if icon == "⚠️" else escape_md(item["status"])
-            reason = f" - {escape_md(reason_text)}" if reason_text and icon == "❌" else ""
-            lines.append(f"{icon} `{name}` : {status_label}{reason}")
-        _respond(chat_id, "Providers:\n" + "\n".join(lines), placeholder_message_id)
+        def _format_provider_lines(items: list[dict], pending: frozenset[str] = frozenset()) -> str:
+            lines = []
+            for item in items:
+                name = item["provider"]
+                reason_text = item.get("reason") or ""
+                auth_needed = item.get("status") == "auth_needed"
+                if name in pending:
+                    icon = "🕚"
+                    status_label = "checking…"
+                    reason = ""
+                elif auth_needed:
+                    icon = "⚠️"
+                    status_label = "auth needed"
+                    reason = ""
+                elif item["enabled"]:
+                    icon = "✅"
+                    status_label = escape_md(item["status"])
+                    reason = ""
+                else:
+                    icon = "❌"
+                    status_label = escape_md(item["status"])
+                    reason = f" \\- {escape_md(reason_text)}" if reason_text else ""
+                lines.append(f"{icon} `{name}` : {status_label}{reason}")
+            return "Providers:\n" + "\n".join(lines)
+
+        # Identify providers that require a slow PTY check (have is_authenticated method)
+        slow_providers: set[str] = set()
+        for pname, pobj in orchestrator.provider_registry._providers.items():
+            if callable(getattr(pobj, "is_authenticated", None)):
+                slow_providers.add(pname)
+
+        # Show initial state immediately with 🕚 for slow providers
+        initial_items = orchestrator.provider_registry.list_capabilities()
+        pending_set = frozenset(
+            item["provider"] for item in initial_items if item["provider"] in slow_providers
+        )
+        _respond(chat_id, _format_provider_lines(initial_items, pending_set), placeholder_message_id)
+
+        if pending_set:
+            _PROVIDERS_CHECK_TIMEOUT_SEC = 300  # 5 minutes; leave 🕚 if exceeded
+
+            def _bg_verify() -> None:
+                orchestrator.provider_registry.verify_all(force=True)
+
+            def _bg_watcher() -> None:
+                t = threading.Thread(target=_bg_verify, daemon=True)
+                t.start()
+                t.join(timeout=_PROVIDERS_CHECK_TIMEOUT_SEC)
+                if not t.is_alive():
+                    final_items = orchestrator.provider_registry.list_capabilities()
+                    final_text = _format_provider_lines(final_items, frozenset())
+                    edit_telegram_message(chat_id, placeholder_message_id, final_text)
+                # if still alive: timed out — leave the message as-is (🕚 checking…)
+
+            threading.Thread(target=_bg_watcher, daemon=True).start()
         return
 
     if command == "/run":

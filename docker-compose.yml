@@ -38,8 +38,8 @@ services:
       TELEGRAM_MODE: ${TELEGRAM_MODE:-webhook}
     volumes:
       - ./:/app
-      - cursor-cli-auth:/root/.cursor
-      - claude-cli-auth:/root/.claude
+      - cursor-cli-auth:/home/non-root-agent/.cursor
+      - claude-cli-auth:/home/non-root-agent/.claude
     command: uvicorn app.main:app --host 0.0.0.0 --port 3000 --reload
 
 volumes:

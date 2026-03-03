@@ -106,6 +106,71 @@ class CursorCliProvider:
         """Wait for the login process to complete. Returns True on success."""
         return session.wait(timeout_sec)
 
+    def is_authenticated(self) -> bool | None:
+        """Run `agent status` inside a PTY (required — hangs without one).
+
+        Returns True/False/None (None = could not determine).
+        """
+        import os as _os
+        import select as _select
+        import sys as _sys
+        settings = get_settings()
+        cmd = [settings.cursor_cli_command, "status"]
+
+        if _sys.platform == "win32":
+            # No pty module on Windows; fall back to plain subprocess
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+                combined = f"{proc.stdout}\n{proc.stderr}".lower()
+            except Exception as exc:
+                logger.debug("cursor_cli is_authenticated (win32): %s", exc)
+                return None
+        else:
+            try:
+                import pty as _pty
+                master_fd, slave_fd = _pty.openpty()
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                    close_fds=True,
+                    start_new_session=True,
+                    env={**_os.environ, "NO_COLOR": "1"},
+                )
+                _os.close(slave_fd)
+                output_bytes = b""
+                deadline = __import__("time").monotonic() + 8
+                while __import__("time").monotonic() < deadline:
+                    r, _, _ = _select.select([master_fd], [], [], 0.2)
+                    if r:
+                        try:
+                            output_bytes += _os.read(master_fd, 4096)
+                        except OSError:
+                            break
+                    if proc.poll() is not None:
+                        break
+                try:
+                    _os.close(master_fd)
+                except OSError:
+                    pass
+                if proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                combined = output_bytes.decode("utf-8", errors="replace").lower()
+            except Exception as exc:
+                logger.debug("cursor_cli is_authenticated (pty): %s", exc)
+                return None
+
+        logger.debug("cursor_cli is_authenticated: output=%r", combined[:200])
+        if "not logged in" in combined:
+            return False
+        if "logged in" in combined:
+            return True
+        logger.debug("cursor_cli is_authenticated: ambiguous output → None")
+        return None
+
     def get_task(self, external_run_id: str) -> ProviderTaskResult:
         return ProviderTaskResult(success=False, output="", error="cursor_cli does not support remote get_task")
 

@@ -16,18 +16,20 @@ RUN if [ "${INSTALL_NODEJS}" = "true" ]; then \
 
 # Create a non-root user. The Claude CLI refuses --dangerously-skip-permissions
 # when running as root, and OAuth credentials are stored in $HOME/.claude/.
-RUN useradd -m -u 1000 -s /bin/bash claude
+RUN useradd -m -u 1000 -s /bin/bash non-root-agent
 
 WORKDIR /app
-RUN chown claude:claude /app
+RUN chown non-root-agent:non-root-agent /app
 
-COPY --chown=claude:claude pyproject.toml README.md ./
-COPY --chown=claude:claude app ./app
+COPY --chown=non-root-agent:non-root-agent pyproject.toml README.md ./
+COPY --chown=non-root-agent:non-root-agent app ./app
 
-USER claude
-ENV PATH="/home/claude/.local/bin:${PATH}"
+USER non-root-agent
+# Pre-create auth dirs as non-root-agent so named volumes inherit correct ownership
+RUN mkdir -p /home/non-root-agent/.cursor /home/non-root-agent/.claude
+ENV PATH="/home/non-root-agent/.local/bin:${PATH}"
 # Redirect global npm installs to a user-writable location (avoids EACCES on /usr/local)
-ENV NPM_CONFIG_PREFIX=/home/claude/.local
+ENV NPM_CONFIG_PREFIX=/home/non-root-agent/.local
 
 RUN pip install --no-cache-dir -e .
 

@@ -121,6 +121,17 @@ class ClaudeCliProvider:
         except Exception as exc:  # noqa: BLE001
             logger.warning("claude_cli: failed to write refreshed credentials: %s", exc)
 
+    def is_authenticated(self) -> bool | None:
+        """Return False if ~/.claude/.credentials.json is missing or has no access token."""
+        creds_file = Path.home() / ".claude" / ".credentials.json"
+        if not creds_file.exists():
+            return False
+        try:
+            creds = json.loads(creds_file.read_text())
+            return bool((creds.get("claudeAiOauth") or {}).get("accessToken"))
+        except Exception:
+            return None
+
     def launch_task(self, request: ProviderTaskRequest) -> ProviderTaskResult:
         settings = get_settings()
         self._maybe_refresh_token(settings)

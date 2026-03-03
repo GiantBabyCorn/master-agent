@@ -193,6 +193,17 @@ class ProviderRegistry:
             base["reason"] = error
             return base
 
+        provider_obj = self._providers.get(provider)
+        if provider_obj is not None and hasattr(provider_obj, "is_authenticated"):
+            auth_state = provider_obj.is_authenticated()
+            if auth_state is False:
+                # Keep enabled=True so /run still triggers the auth flow via
+                # AUTH_REQUIRED_MARKER.  status="auth_needed" is display-only.
+                base["enabled"] = True
+                base["status"] = "auth_needed"
+                base["reason"] = f'CLI "{command}" exists but is not authenticated'
+                return base
+
         base["enabled"] = True
         base["status"] = "available"
         return base

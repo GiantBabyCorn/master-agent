@@ -1,5 +1,6 @@
 import logging
 import sys
+from pathlib import Path
 
 from fastapi import FastAPI
 from sqlalchemy import inspect, text
@@ -82,6 +83,17 @@ def _maybe_revoke_stale_webhook() -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    # Ensure cursor and claude auth subdirs exist inside mounted volumes.
+    # Silently skip if the volume is root-owned (old volume — user must recreate it).
+    for _d in [
+        Path.home() / ".cursor" / "projects",
+        Path.home() / ".claude",
+    ]:
+        try:
+            _d.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.warning("Cannot create %s — volume may be root-owned; recreate Docker volumes to fix", _d)
+
     if settings.db_enable_startup_migration_gate:
         inspector = inspect(engine)
         existing_tables = set(inspector.get_table_names())
