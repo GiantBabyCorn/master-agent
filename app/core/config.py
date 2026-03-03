@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     approval_medium_requires_user: bool = True
 
     request_timeout_sec: int = 30
-    claude_cli_task_timeout_sec: int = 600  # claude -p can run for minutes; separate from API timeout
+    claude_cli_task_timeout_sec: int = 3600  # claude -p can run for many minutes; separate from API timeout
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 300
     circuit_breaker_fail_threshold: int = 5

@@ -387,6 +387,36 @@ def _make_workspace() -> str:
 _ZIP_PART_BYTES = 45 * 1024 * 1024  # 45 MB — Telegram bot limit is 50 MB
 
 
+# ---------------------------------------------------------------------------
+# Heartbeat helper — edits a placeholder message periodically while a
+# long-running task is in progress so the user sees elapsed time.
+# ---------------------------------------------------------------------------
+def _run_with_heartbeat(task_fn, chat_id: int, placeholder_id: int | None, interval_sec: int = 60):
+    """Run task_fn() on the current thread; a daemon thread edits the
+    placeholder every *interval_sec* seconds with elapsed time.
+    Returns whatever task_fn() returns."""
+    done = threading.Event()
+    start = time.monotonic()
+
+    def _heartbeat() -> None:
+        while not done.wait(timeout=interval_sec):
+            elapsed = int(time.monotonic() - start)
+            mins, secs = divmod(elapsed, 60)
+            label = f"{mins}m {secs}s" if mins else f"{secs}s"
+            try:
+                if placeholder_id is not None:
+                    edit_telegram_message(chat_id, placeholder_id, f"⏳ Working... ({label} elapsed)")
+            except Exception:  # noqa: BLE001
+                pass
+
+    t = threading.Thread(target=_heartbeat, daemon=True)
+    t.start()
+    try:
+        return task_fn()
+    finally:
+        done.set()
+
+
 def _send_workspace_output(chat_id: int, workspace: str, reply_to_id: int | None) -> None:
     """If the agent created an output/ subfolder, zip its contents and send back.
 
@@ -523,14 +553,14 @@ def _handle_cli_auth_required(
             edit_telegram_message(
                 chat_id,
                 placeholder_id,
-                f"Tap the button below to open the *{escape_md(provider_name)}* login page.\n\n"
+                f"Tap the button below to open the *{provider_name}* login page.\n\n"
                 "The page will show an *Authentication Code* — copy it, then *reply to this message* with the code.",
             )
         else:
             edit_telegram_message(
                 chat_id,
                 placeholder_id,
-                f"Tap the button below to log in to *{escape_md(provider_name)}*:",
+                f"Tap the button below to log in to *{provider_name}*:",
             )
         send_telegram_message_with_buttons(
             chat_id,
@@ -543,7 +573,7 @@ def _handle_cli_auth_required(
         edit_telegram_message(
             chat_id,
             placeholder_id,
-            f"Login required for *{escape_md(provider_name)}*.\n\n"
+            f"Login required for *{provider_name}*.\n\n"
             "No URL was captured — please run the login command directly in the server terminal.\n"
             f"_Waiting up to {timeout_min} min for login to complete..._",
         )
@@ -584,14 +614,14 @@ def _handle_cli_auth_required(
             edit_telegram_message(
                 chat_id,
                 placeholder_id,
-                f"Login for *{escape_md(provider_name)}* failed."
+                f"Login for *{provider_name}* failed."
                 f"\nTry `/login {provider_name}` to try again.{diag}",
             )
             return
         # Bust the registry cache so /providers reflects the new auth state
         orchestrator.provider_registry.verify_all(force=True)
         if rerun_fn is None:
-            edit_telegram_message(chat_id, placeholder_id, f"Login to *{escape_md(provider_name)}* successful!")
+            edit_telegram_message(chat_id, placeholder_id, f"Login to *{provider_name}* successful!")
         else:
             edit_telegram_message(chat_id, placeholder_id, "Login successful. Retrying your command...")
             rerun_fn()
@@ -947,14 +977,18 @@ def dispatch_telegram_command(
         meta_with_ws = {**(metadata or {}), "workspace": workspace}
 
         def _run_task():
-            r = orchestrator.submit_task(
-                db,
-                provider=provider,
-                prompt=prompt,
-                requested_by=f"telegram:{chat_id}",
-                idempotency_key=None,
-                project_path=workspace,
-                metadata=meta_with_ws,
+            r = _run_with_heartbeat(
+                lambda: orchestrator.submit_task(
+                    db,
+                    provider=provider,
+                    prompt=prompt,
+                    requested_by=f"telegram:{chat_id}",
+                    idempotency_key=None,
+                    project_path=workspace,
+                    metadata=meta_with_ws,
+                ),
+                chat_id,
+                placeholder_message_id,
             )
             if r.approval_required:
                 _respond(chat_id, f"⏳ *Approval required*\nTask: `{r.task_id}`\nReason: {escape_md(r.error or '')}", placeholder_message_id)
@@ -962,14 +996,18 @@ def dispatch_telegram_command(
                 _respond(chat_id, escape_md(r.output or r.error or "No output"), placeholder_message_id)
                 _send_workspace_output(chat_id, workspace, placeholder_message_id)
 
-        result = orchestrator.submit_task(
-            db,
-            provider=provider,
-            prompt=prompt,
-            requested_by=f"telegram:{chat_id}",
-            idempotency_key=idempotency_key,
-            project_path=workspace,
-            metadata=meta_with_ws,
+        result = _run_with_heartbeat(
+            lambda: orchestrator.submit_task(
+                db,
+                provider=provider,
+                prompt=prompt,
+                requested_by=f"telegram:{chat_id}",
+                idempotency_key=idempotency_key,
+                project_path=workspace,
+                metadata=meta_with_ws,
+            ),
+            chat_id,
+            placeholder_message_id,
         )
         if result.error and AUTH_REQUIRED_MARKER in result.error:
             _handle_cli_auth_required(chat_id, placeholder_message_id, orchestrator, provider, _run_task)
