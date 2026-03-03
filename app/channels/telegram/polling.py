@@ -34,6 +34,19 @@ class TelegramPollingRunner:
             self._thread.join(timeout=2)
         logger.info("Telegram polling runner stopped")
 
+    def _dispatch(self, update: TelegramUpdate) -> None:
+        db = SessionLocal()
+        try:
+            if update.callback_query:
+                handle_telegram_callback(db, update.callback_query, self._orchestrator)
+            else:
+                handle_telegram_update(db, update, self._orchestrator)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.warning("Error handling update %s: %s", update.update_id, exc)
+        finally:
+            db.close()
+
     def _run(self) -> None:
         settings = get_settings()
         if settings.telegram_poll_interval_sec < 1.0:
@@ -48,17 +61,11 @@ class TelegramPollingRunner:
                 for raw_update in updates:
                     update = TelegramUpdate.model_validate(raw_update)
                     self._offset = update.update_id + 1
-                    db = SessionLocal()
-                    try:
-                        if update.callback_query:
-                            handle_telegram_callback(db, update.callback_query, self._orchestrator)
-                        else:
-                            handle_telegram_update(db, update, self._orchestrator)
-                    except Exception:  # noqa: BLE001
-                        db.rollback()
-                        raise
-                    finally:
-                        db.close()
+                    threading.Thread(
+                        target=self._dispatch,
+                        args=(update,),
+                        daemon=True,
+                    ).start()
             except TelegramRateLimitError as exc:
                 sleep_sec = exc.retry_after
                 logger.warning("Backing off polling for %.1fs due to rate limit", sleep_sec)
